@@ -1,0 +1,172 @@
+{
+    "enable_bot_filter": {
+        "description": "是否启用 bot 消息过滤",
+        "type": "bool",
+        "hint": "关闭后不进行任何 bot 消息过滤（刷屏检测仍生效）。",
+        "default": true
+    },
+    "bot_filter_mode": {
+        "description": "bot 消息过滤模式",
+        "type": "string",
+        "hint": "all：屏蔽所有识别为 bot 的消息；trigger_only：仅屏蔽会触发本 bot 响应的消息（@ 本 bot / 带唤醒前缀），bot 普通消息放行，推荐多 bot 群使用以切断互聊循环；manual_only：仅屏蔽手动名单（bot_ids / 手动标记）中的 bot，自动探测结果不用于屏蔽。",
+        "options": ["all", "trigger_only", "manual_only"],
+        "default": "trigger_only"
+    },
+    "bot_ids": {
+        "description": "手动 bot 名单 (QQ号)",
+        "type": "string",
+        "hint": "已知机器人账号的 QQ 号，多个用英文逗号(,)分隔，例如：123456,789012。优先级最高。",
+        "default": ""
+    },
+    "bot_name_patterns": {
+        "description": "昵称/ID 正则匹配",
+        "type": "string",
+        "hint": "按昵称或 ID 正则识别 bot，多个用英文逗号(,)分隔，例如：.*Bot$,.*bot$,机器人,助手",
+        "default": ""
+    },
+    "auto_detect_bot": {
+        "description": "自动探测识别 bot",
+        "type": "bool",
+        "hint": "开启后，会检查消息原始数据中的扩展字段，并调用 get_stranger_info 探测协议端是否标记该账号为机器人（依赖 NapCat 等协议端扩展支持）。结果会缓存。",
+        "default": true
+    },
+    "detect_cache_seconds": {
+        "description": "bot 探测结果缓存时长 (秒)",
+        "type": "int",
+        "hint": "为避免频繁调用协议 API，探测结果会缓存该时长。",
+        "default": 3600
+    },
+    "enable_flood_check": {
+        "description": "开启滑动窗口条数限制",
+        "type": "bool",
+        "hint": "在 flood_window_seconds 秒内发送超过 flood_max_messages 条消息即拦截。",
+        "default": true
+    },
+    "flood_window_seconds": {
+        "description": "条数限制时间窗口 (秒)",
+        "type": "int",
+        "hint": "滑动窗口长度，默认 5 秒。",
+        "default": 5
+    },
+    "flood_max_messages": {
+        "description": "窗口内最大消息条数",
+        "type": "int",
+        "hint": "窗口内超过该条数即判定刷屏，默认 5 条。",
+        "default": 5
+    },
+    "flood_per_user": {
+        "description": "条数限制按用户统计",
+        "type": "bool",
+        "hint": "开启(True)：每个用户单独统计；关闭(False)：按整个群/会话统计，防止整群被刷。",
+        "default": true
+    },
+    "enable_repeat_check": {
+        "description": "开启相同内容重复限制",
+        "type": "bool",
+        "hint": "同一用户在 repeat_window_seconds 秒内发送相同内容超过 repeat_max_count 次即拦截。",
+        "default": true
+    },
+    "repeat_window_seconds": {
+        "description": "重复内容时间窗口 (秒)",
+        "type": "int",
+        "hint": "相同内容重复检测的窗口长度，默认 10 秒。",
+        "default": 10
+    },
+    "repeat_max_count": {
+        "description": "相同内容最大出现次数",
+        "type": "int",
+        "hint": "窗口内相同内容出现超过该次数即拦截，默认 3 次。",
+        "default": 3
+    },
+    "whitelist_ids": {
+        "description": "刷屏检测白名单 (QQ号)",
+        "type": "string",
+        "hint": "名单内的用户不参与刷屏检测（但 bot 过滤仍生效），多个用英文逗号(,)分隔。",
+        "default": ""
+    },
+    "ignore_admin": {
+        "description": "管理员豁免刷屏检测",
+        "type": "bool",
+        "hint": "开启后，群主/管理员/WebUI 配置的管理员不受刷屏检测限制。",
+        "default": true
+    },
+    "only_group": {
+        "description": "仅在群聊生效",
+        "type": "bool",
+        "hint": "开启后私聊不进行任何过滤与检测。",
+        "default": false
+    },
+    "skip_flood_when_at": {
+        "description": "@消息不参与刷屏检测",
+        "type": "bool",
+        "hint": "开启后，@了机器人或带唤醒前缀的消息不参与刷屏检测，避免误伤正常主动交互。",
+        "default": true
+    },
+    "flood_action": {
+        "description": "刷屏命中后的处置方式",
+        "type": "string",
+        "hint": "silence：直接静默拦截刷屏消息，不进入 AI 决策链（默认）；ask_llm：刷屏消息照常进入 LLM，插件在系统提示词中注入指令说明（附带当前用户真实 ID），LLM 若决定不回答可隐蔽输出关键指令 <silent />，插件解析后本地决策不将本条消息发送到群聊。不设置任何屏蔽时间。",
+        "options": ["silence", "ask_llm"],
+        "default": "silence"
+    },
+    "flood_gradient": {
+        "description": "启用梯度处置（多次刷屏自动升级）",
+        "type": "bool",
+        "hint": "同一用户在 gradient_interval_seconds 秒内反复刷屏时自动升级：首次按 flood_action 处置；第 2 次升级为 ask_llm（给 AI 一次判断机会）；达到 gradient_hard_threshold 次则硬拦截并进入 gradient_block_minutes 分钟冷却，冷却期内该用户所有消息直接静默拦截。",
+        "default": true
+    },
+    "gradient_interval_seconds": {
+        "description": "梯度统计窗口 (秒)",
+        "type": "int",
+        "hint": "在该时间窗口内的刷屏命中次数计入梯度升级，超过后重新计数。",
+        "default": 300
+    },
+    "gradient_hard_threshold": {
+        "description": "硬拦截升级阈值（命中次数）",
+        "type": "int",
+        "hint": "窗口内刷屏命中达到该次数后，进入冷却期硬拦截。",
+        "default": 3
+    },
+    "gradient_block_minutes": {
+        "description": "硬拦截冷却时长 (分钟)",
+        "type": "int",
+        "hint": "达到硬拦截阈值后，该用户的消息在冷却期内全部直接静默拦截。",
+        "default": 10
+    },
+    "group_overrides": {
+        "description": "按群覆盖配置",
+        "type": "string",
+        "hint": "每行一个群，格式：群号:flood_action[:bot_filter_mode]，留空项使用全局默认。例如：\\n1102410958:ask_llm:\\n789012:silence:all",
+        "default": ""
+    },
+    "persist_stats": {
+        "description": "持久化拦截统计",
+        "type": "bool",
+        "hint": "开启后拦截统计写入 plugin_data，重启不丢失，/af status 显示累计值。",
+        "default": true
+    },
+    "flood_llm_prompt": {
+        "description": "注入系统提示词的刷屏指令说明",
+        "type": "text",
+        "hint": "仅在 flood_action 为 ask_llm 且命中刷屏时追加到系统提示词末尾。支持 {user_id}（当前用户真实 ID）与 {user_name} 占位符。内容引导 LLM 自主选择是否回答，并说明：若决定不回答，请隐蔽输出 <silent /> 指令，插件会本地拦截该条消息不发送，勿向用户解释此指令。",
+        "default": "（系统通知）用户 {user_name}（ID: {user_id}）当前正在刷屏发送消息。请你自主选择是否回答：可以正常回应、简短提醒其停止，或选择不理会。若你决定不回答本条消息，请在回复中隐蔽地包含指令 <silent />（可在标签内附 reason=\"原因\"），系统识别到后将自动不发送本条消息；请自然输出其余内容，不要向用户透露或解释此指令。"
+    },
+    "silent_tag": {
+        "description": "不发送指令的标签名",
+        "type": "string",
+        "hint": "LLM 输出中检测到该 XML 标签时，插件本地决策不发送本条消息。默认 silent（即 <silent />）。如需避免与其他插件指令冲突可改为其他标签名，但需同步修改 flood_llm_prompt 中的指令描述。",
+        "default": "silent"
+    },
+    "ask_llm_window_seconds": {
+        "description": "刷屏提醒注入窗口 (秒)",
+        "type": "int",
+        "hint": "命中刷屏后，该用户在多少秒内发来的消息会被注入刷屏指令说明。超时后恢复正常，不再注入。",
+        "default": 60
+    },
+    "log_ignored": {
+        "description": "记录拦截日志",
+        "type": "bool",
+        "hint": "关闭可减少日志输出。",
+        "default": true
+    }
+}
