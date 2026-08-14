@@ -43,8 +43,15 @@ _ACTION_DESC = {
     "ask_llm": "交给 LLM 自主决定",
 }
 
+# ---- 配置默认值（与 _conf_schema.json 保持一致）----
+_DFT_FLOOD_WINDOW = 5          # flood_window_seconds
+_DFT_REPEAT_WINDOW = 10        # repeat_window_seconds
+_DFT_CACHE_TTL = 3600          # detect_cache_seconds
+_DFT_FLOOD_ACTION = "silence"
+_DFT_BOT_FILTER_MODE = "trigger_only"
 
-@register("astrbot_plugin_anti_flood", "Administrator", "防刷屏与 Bot 消息过滤器", "1.1.1")
+
+@register("astrbot_plugin_anti_flood", "Administrator", "防刷屏与 Bot 消息过滤器", "1.1.2")
 class AntiFloodPlugin(Star):
     """防止自动刷屏，选择性忽略其他 bot 的消息。"""
 
@@ -112,13 +119,13 @@ class AntiFloodPlugin(Star):
         return patterns
 
     def _cache_ttl(self) -> float:
-        return float(self.config.get("detect_cache_seconds", 3600))
+        return float(self.config.get("detect_cache_seconds", _DFT_CACHE_TTL))
 
     def _max_window(self) -> float:
         """所有检测时间窗口的最大值，用于清理过期记录"""
         return max(
-            float(self.config.get("flood_window_seconds", 5)),
-            float(self.config.get("repeat_window_seconds", 10)),
+            float(self.config.get("flood_window_seconds", _DFT_FLOOD_WINDOW)),
+            float(self.config.get("repeat_window_seconds", _DFT_REPEAT_WINDOW)),
         )
 
     def _parse_group_overrides(self) -> dict[str, dict]:
@@ -159,7 +166,7 @@ class AntiFloodPlugin(Star):
             override = self._parse_group_overrides().get(group_id)
             if override and override["flood_action"]:
                 return override["flood_action"]
-        return str(self.config.get("flood_action", "silence"))
+        return str(self.config.get("flood_action", _DFT_FLOOD_ACTION))
 
     def _effective_mode(self, group_id) -> str:
         """按群覆盖后的 bot 过滤模式，未覆盖则用全局配置（实时解析，支持热更新）"""
@@ -167,7 +174,7 @@ class AntiFloodPlugin(Star):
             override = self._parse_group_overrides().get(group_id)
             if override and override["bot_filter_mode"]:
                 return override["bot_filter_mode"]
-        return str(self.config.get("bot_filter_mode", "trigger_only"))
+        return str(self.config.get("bot_filter_mode", _DFT_BOT_FILTER_MODE))
 
     def _stats_path(self) -> str:
         base = os.path.join(
@@ -346,7 +353,7 @@ class AntiFloodPlugin(Star):
         repeat_hit = False
         # 1. 滑动窗口条数限制
         if self.config.get("enable_flood_check", True):
-            window = float(self.config.get("flood_window_seconds", 5))
+            window = float(self.config.get("flood_window_seconds", _DFT_FLOOD_WINDOW))
             limit = int(self.config.get("flood_max_messages", 5))
             if window > 0 and limit > 0:
                 dq = self._flood_history[self._flood_key(event, sender_id)]
@@ -356,7 +363,7 @@ class AntiFloodPlugin(Star):
                 flood_hit = len(dq) > limit
         # 2. 相同内容重复限制
         if self.config.get("enable_repeat_check", True):
-            window = float(self.config.get("repeat_window_seconds", 10))
+            window = float(self.config.get("repeat_window_seconds", _DFT_REPEAT_WINDOW))
             limit = int(self.config.get("repeat_max_count", 3))
             if window > 0 and limit > 0 and content:
                 dq = self._repeat_history[self._user_key(event, sender_id)][
@@ -641,10 +648,10 @@ class AntiFloodPlugin(Star):
             "【防刷屏插件状态】",
             f"- Bot 过滤: {'开启' if self.config.get('enable_bot_filter', True) else '关闭'}",
             f"- 过滤模式: "
-            f"{_MODE_DESC.get(str(self.config.get('bot_filter_mode', 'trigger_only')), '未知')}",
+            f"{_MODE_DESC.get(str(self.config.get('bot_filter_mode', _DFT_BOT_FILTER_MODE)), '未知')}",
             f"- 自动探测: {'开启' if self.config.get('auto_detect_bot', True) else '关闭'}",
             f"- 条数限制: "
-            f"{self.config.get('flood_window_seconds', 5)} 秒内 "
+            f"{self.config.get('flood_window_seconds', _DFT_FLOOD_WINDOW)} 秒内 "
             f"{self.config.get('flood_max_messages', 5)} 条"
             + (
                 ""
@@ -652,7 +659,7 @@ class AntiFloodPlugin(Star):
                 else " (已关闭)"
             ),
             f"- 重复限制: "
-            f"{self.config.get('repeat_window_seconds', 10)} 秒内 "
+            f"{self.config.get('repeat_window_seconds', _DFT_REPEAT_WINDOW)} 秒内 "
             f"{self.config.get('repeat_max_count', 3)} 次"
             + (
                 ""
@@ -660,7 +667,7 @@ class AntiFloodPlugin(Star):
                 else " (已关闭)"
             ),
             f"- 刷屏处置: "
-            f"{_ACTION_DESC.get(str(self.config.get('flood_action', 'silence')), '未知')}"
+            f"{_ACTION_DESC.get(str(self.config.get('flood_action', _DFT_FLOOD_ACTION)), '未知')}"
             + (
                 "（LLM 自主决定是否回答）"
                 if self.config.get("flood_action") == "ask_llm"
