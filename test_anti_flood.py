@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """anti_flood 插件单元测试：配置解析、bot 识别、刷屏检测、过期清理"""
+import asyncio
 import sys
 import time
 import unittest
@@ -46,6 +47,7 @@ class FakeEvent:
         at_or_wake=False,
         raw_message=None,
         bot=None,
+        message_str="",
     ):
         self._group_id = group_id
         self._sender_id = sender_id
@@ -55,6 +57,7 @@ class FakeEvent:
         self.is_at_or_wake_command = at_or_wake
         self.message_obj = type("M", (), {"raw_message": raw_message})()
         self.bot = bot
+        self.message_str = message_str
 
     def get_group_id(self):
         return self._group_id
@@ -300,6 +303,133 @@ class TestFloodCheck(unittest.TestCase):
         p._cleanup()
         self.assertNotIn("onebot:group:g:user:u", p._flood_history)
         self.assertNotIn("x", p._bot_cache)
+
+
+class TestLlmAskMode(unittest.TestCase):
+    """ask_llm 模式核心链路：系统提示词注入 + <silent /> 指令解析"""
+
+    def _plugin(self, **overrides):
+        p = make_plugin(
+            flood_action="ask_llm",
+            flood_llm_prompt="检测到刷屏。用户ID: {user_id}，昵称: {user_name}。请自行决定是否回答。",
+            silent_tag="silent",
+            **overrides,
+        )
+        return p
+
+    def test_llm_request_injects_prompt_for_flood_target(self):
+        p = self._plugin()
+        ev = FakeEvent(group_id="g1", sender_id="u1", sender_name="小明")
+        user_key = p._user_key(ev, "u1")
+        p._llm_ask_targets[user_key] = time.time() + 60
+        req = type("Req", (), {"system_prompt": None})()
+        asyncio.run(p.on_llm_request(ev, req))
+        self.assertIn("用户ID: u1", req.system_prompt)
+        self.assertIn("小明", req.system_prompt)
+        self.assertEqual(p.stats["llm_judged"], 1)
+
+    def test_llm_request_no_inject_when_not_ask_mode(self):
+        p = make_plugin(flood_action="silence")
+        ev = FakeEvent(group_id="g1", sender_id="u1")
+        p._llm_ask_targets[p._user_key(ev, "u1")] = time.time() + 60
+        req = type("Req", (), {"system_prompt": "base"})()
+        asyncio.run(p.on_llm_request(ev, req))
+        self.assertEqual(req.system_prompt, "base")
+
+    def test_llm_request_no_inject_when_target_expired(self):
+        p = self._plugin()
+        ev = FakeEvent(group_id="g1", sender_id="u1")
+        p._llm_ask_targets[p._user_key(ev, "u1")] = time.time() - 1
+        req = type("Req", (), {"system_prompt": "base"})()
+        asyncio.run(p.on_llm_request(ev, req))
+        self.assertEqual(req.system_prompt, "base")
+
+    def test_llm_request_appends_to_existing_prompt(self):
+        p = self._plugin()
+        ev = FakeEvent(group_id="g1", sender_id="u1")
+        p._llm_ask_targets[p._user_key(ev, "u1")] = time.time() + 60
+        req = type("Req", (), {"system_prompt": "既有提示词"})()
+        asyncio.run(p.on_llm_request(ev, req))
+        self.assertTrue(req.system_prompt.startswith("既有提示词\n"))
+
+    def test_llm_response_silent_tag_clears_text(self):
+        p = self._plugin()
+        ev = FakeEvent(group_id="g1", sender_id="u1")
+        resp = type("Resp", (), {"completion_text": "这是回复 <silent /> 尾巴"})()
+        asyncio.run(p.on_llm_response(ev, resp))
+        self.assertEqual(resp.completion_text, "")
+        self.assertEqual(p.stats["llm_held"], 1)
+
+    def test_llm_response_silent_with_reason(self):
+        p = self._plugin()
+        ev = FakeEvent(group_id="g1", sender_id="u1")
+        resp = type("Resp", (), {"completion_text": '<silent reason="重复刷屏" />'})()
+        asyncio.run(p.on_llm_response(ev, resp))
+        self.assertEqual(resp.completion_text, "")
+
+    def test_llm_response_silent_pair_stripped_keeps_text(self):
+        # <silent>...</silent> 包裹形式：命中即清空输出（插件本地决策不发送整条消息）
+        p = self._plugin()
+        ev = FakeEvent(group_id="g1", sender_id="u1")
+        resp = type("Resp", (), {"completion_text": "前半 <silent>不发送</silent> 后半"})()
+        asyncio.run(p.on_llm_response(ev, resp))
+        self.assertEqual(resp.completion_text, "")
+
+    def test_llm_response_untouched_when_not_ask_mode(self):
+        p = make_plugin(flood_action="silence")
+        ev = FakeEvent(group_id="g1", sender_id="u1")
+        resp = type("Resp", (), {"completion_text": "正常回复 <silent />"})()
+        asyncio.run(p.on_llm_response(ev, resp))
+        self.assertEqual(resp.completion_text, "正常回复 <silent />")
+
+    def test_gradient_escalates_to_ask_llm(self):
+        # 梯度处置：silence 群内重复刷屏第 2 次命中升级为 ask_llm 目标
+        p = make_plugin(
+            flood_action="silence",
+            enable_repeat_check=True,
+            repeat_max_count=1,
+            repeat_window_seconds=60,
+            flood_max_messages=999,
+            gradient_interval_seconds=300,
+            gradient_hard_threshold=5,  # 拉高硬拦截阈值，只验证升级到 ask_llm
+        )
+        ev = FakeEvent(group_id="g1", sender_id="u1", message_str="aa")
+        p._is_exempt = lambda e, s: False
+
+        async def run():
+            key = p._user_key(ev, "u1")
+            # 消息1：未命中；消息2：第 1 次命中 → 静默拦截
+            await p.intercept(ev)
+            await p.intercept(ev)
+            self.assertNotIn(key, p._llm_ask_targets)
+            # 消息3：第 2 次命中 → 升级 ask_llm，登记提醒目标
+            await p.intercept(ev)
+            return p._llm_ask_targets.get(key, 0) > time.time()
+
+        self.assertTrue(asyncio.run(run()))
+
+    def test_gradient_hard_block_after_threshold(self):
+        # 梯度处置：命中次数达阈值进入冷却期硬拦截
+        p = make_plugin(
+            flood_action="ask_llm",
+            enable_repeat_check=True,
+            repeat_max_count=1,
+            repeat_window_seconds=60,
+            flood_max_messages=999,
+            gradient_interval_seconds=300,
+            gradient_hard_threshold=3,
+        )
+        ev = FakeEvent(group_id="g1", sender_id="u1", message_str="aa")
+        p._is_exempt = lambda e, s: False
+
+        async def run():
+            key = p._user_key(ev, "u1")
+            # 第 4 条消息时第 3 次命中，count=3 达到阈值 → block_until 生效
+            for _ in range(4):
+                await p.intercept(ev)
+            return p._flood_levels[key]["block_until"] > time.time()
+
+        self.assertTrue(asyncio.run(run()))
 
 
 if __name__ == "__main__":
