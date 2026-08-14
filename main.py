@@ -14,6 +14,7 @@
 拦截方式均为静默忽略（stop_event），不会发送警告消息，避免插件自身刷屏。
 """
 
+import bisect
 import json
 import os
 import re
@@ -51,7 +52,7 @@ _DFT_FLOOD_ACTION = "silence"
 _DFT_BOT_FILTER_MODE = "trigger_only"
 
 
-@register("astrbot_plugin_anti_flood", "Administrator", "防刷屏与 Bot 消息过滤器", "1.1.2")
+@register("astrbot_plugin_anti_flood", "Administrator", "防刷屏与 Bot 消息过滤器", "1.1.3")
 class AntiFloodPlugin(Star):
     """防止自动刷屏，选择性忽略其他 bot 的消息。"""
 
@@ -90,6 +91,22 @@ class AntiFloodPlugin(Star):
 
     # ==================== 配置辅助 ====================
 
+    @staticmethod
+    def _safe_float(key_value, default: float) -> float:
+        """安全浮点转换：WebUI 脏值回退默认，避免检测流程崩溃"""
+        try:
+            return float(key_value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    @staticmethod
+    def _safe_int(key_value, default: int) -> int:
+        """安全整数转换：WebUI 脏值回退默认"""
+        try:
+            return int(key_value)
+        except (TypeError, ValueError):
+            return int(default)
+
     def _bot_id_set(self) -> set[str]:
         """解析手动配置的 bot 名单（带 TTL 缓存，配置修改后自动失效）"""
         raw = str(self.config.get("bot_ids", "") or "")
@@ -119,13 +136,13 @@ class AntiFloodPlugin(Star):
         return patterns
 
     def _cache_ttl(self) -> float:
-        return float(self.config.get("detect_cache_seconds", _DFT_CACHE_TTL))
+        return self._safe_float(self.config.get("detect_cache_seconds", _DFT_CACHE_TTL), _DFT_CACHE_TTL)
 
     def _max_window(self) -> float:
         """所有检测时间窗口的最大值，用于清理过期记录"""
         return max(
-            float(self.config.get("flood_window_seconds", _DFT_FLOOD_WINDOW)),
-            float(self.config.get("repeat_window_seconds", _DFT_REPEAT_WINDOW)),
+            self._safe_float(self.config.get("flood_window_seconds", _DFT_FLOOD_WINDOW), _DFT_FLOOD_WINDOW),
+            self._safe_float(self.config.get("repeat_window_seconds", _DFT_REPEAT_WINDOW), _DFT_REPEAT_WINDOW),
         )
 
     def _parse_group_overrides(self) -> dict[str, dict]:
@@ -321,14 +338,17 @@ class AntiFloodPlugin(Star):
         return "default"
 
     def _user_key(self, event: AstrMessageEvent, sender_id: str) -> str:
-        """带平台前缀的用户维度统计键"""
-        return f"{self._platform_of(event)}:user:{sender_id}"
+        """带平台 + 会话维度（群/私聊）的用户统计键，防止跨群串扰误判"""
+        platform = self._platform_of(event)
+        group_id = event.get_group_id()
+        scope = f"group:{group_id}" if group_id else "private"
+        return f"{platform}:{scope}:user:{sender_id}"
 
     def _flood_key(self, event: AstrMessageEvent, sender_id: str) -> str:
-        """刷屏检测的统计维度：按用户或按会话（均带平台前缀）"""
+        """刷屏检测的统计维度：按用户或按会话（均带平台与群维度）"""
         platform = self._platform_of(event)
         if self.config.get("flood_per_user", True):
-            return f"{platform}:user:{sender_id}"
+            return self._user_key(event, sender_id)
         group_id = event.get_group_id()
         if group_id:
             return f"{platform}:group:{group_id}"
@@ -353,63 +373,90 @@ class AntiFloodPlugin(Star):
         repeat_hit = False
         # 1. 滑动窗口条数限制
         if self.config.get("enable_flood_check", True):
-            window = float(self.config.get("flood_window_seconds", _DFT_FLOOD_WINDOW))
-            limit = int(self.config.get("flood_max_messages", 5))
+            window = self._safe_float(
+                self.config.get("flood_window_seconds", _DFT_FLOOD_WINDOW),
+                _DFT_FLOOD_WINDOW,
+            )
+            limit = self._safe_int(self.config.get("flood_max_messages", 5), 5)
             if window > 0 and limit > 0:
                 dq = self._flood_history[self._flood_key(event, sender_id)]
                 while dq and now - dq[0] > window:
                     dq.popleft()
-                dq.append(now)
+                self._push_sorted(dq, now)
                 flood_hit = len(dq) > limit
         # 2. 相同内容重复限制
         if self.config.get("enable_repeat_check", True):
-            window = float(self.config.get("repeat_window_seconds", _DFT_REPEAT_WINDOW))
-            limit = int(self.config.get("repeat_max_count", 3))
+            window = self._safe_float(
+                self.config.get("repeat_window_seconds", _DFT_REPEAT_WINDOW),
+                _DFT_REPEAT_WINDOW,
+            )
+            limit = self._safe_int(self.config.get("repeat_max_count", 3), 3)
             if window > 0 and limit > 0 and content:
                 dq = self._repeat_history[self._user_key(event, sender_id)][
                     content
                 ]
                 while dq and now - dq[0] > window:
                     dq.popleft()
-                dq.append(now)
+                self._push_sorted(dq, now)
                 repeat_hit = len(dq) > limit
         return flood_hit, repeat_hit
 
+    @staticmethod
+    def _push_sorted(dq: deque, ts: float):
+        """按时间戳有序插入：兼容并发消息时间戳乱序到达（保持队首最早）"""
+        if not dq or dq[-1] <= ts:
+            dq.append(ts)
+        else:
+            dq.insert(bisect.bisect_right(dq, ts), ts)
+
+    @staticmethod
+    def _normalize_content(content: str) -> str:
+        """归一化消息内容用于重复比较：剥离 CQ 码与纯文本 @ 提及前缀"""
+        content = content.strip()
+        if content:
+            content = re.sub(r"\[CQ:[^\]]*\]", "", content).strip()
+            # 微信等无 CQ 码平台：纯文本 @提及前缀不计入重复比较
+            content = re.sub(r"^@[^\s@]+\s*", "", content).strip()
+        return content
+
     def _cleanup(self):
-        """清理过期的检测记录与 bot 探测缓存，防止内存膨胀"""
-        now = time.time()
-        max_window = self._max_window()
-        for key in list(self._flood_history.keys()):
-            dq = self._flood_history[key]
-            while dq and now - dq[0] > max_window:
-                dq.popleft()
-            if not dq:
-                del self._flood_history[key]
-        for uid in list(self._repeat_history.keys()):
-            inner = self._repeat_history[uid]
-            for content in list(inner.keys()):
-                dq = inner[content]
+        """清理过期的检测记录与 bot 探测缓存，防止内存膨胀（防御性：单键异常不影响整体）"""
+        try:
+            now = time.time()
+            max_window = self._max_window()
+            for key in list(self._flood_history.keys()):
+                dq = self._flood_history[key]
                 while dq and now - dq[0] > max_window:
                     dq.popleft()
                 if not dq:
-                    del inner[content]
-            if not inner:
-                del self._repeat_history[uid]
-        for uid in list(self._bot_cache.keys()):
-            if self._bot_cache[uid][1] <= now:
-                del self._bot_cache[uid]
-        for uid in list(self._llm_ask_targets.keys()):
-            if self._llm_ask_targets[uid] <= now:
-                del self._llm_ask_targets[uid]
-        for uid in list(self._flood_levels.keys()):
-            rec = self._flood_levels[uid]
-            if (
-                rec["block_until"] <= now
-                and now - rec["first_ts"] > float(
-                    self.config.get("gradient_interval_seconds", 300)
-                )
-            ):
-                del self._flood_levels[uid]
+                    del self._flood_history[key]
+            for uid in list(self._repeat_history.keys()):
+                inner = self._repeat_history[uid]
+                for content in list(inner.keys()):
+                    dq = inner[content]
+                    while dq and now - dq[0] > max_window:
+                        dq.popleft()
+                    if not dq:
+                        del inner[content]
+                if not inner:
+                    del self._repeat_history[uid]
+            for uid in list(self._bot_cache.keys()):
+                if self._bot_cache[uid][1] <= now:
+                    del self._bot_cache[uid]
+            for uid in list(self._llm_ask_targets.keys()):
+                if self._llm_ask_targets[uid] <= now:
+                    del self._llm_ask_targets[uid]
+            for uid in list(self._flood_levels.keys()):
+                rec = self._flood_levels[uid]
+                if (
+                    rec["block_until"] <= now
+                    and now - rec["first_ts"] > self._safe_float(
+                        self.config.get("gradient_interval_seconds", 300), 300
+                    )
+                ):
+                    del self._flood_levels[uid]
+        except Exception as e:
+            logger.error(f"清理检测记录失败: {e}")
 
     # ==================== LLM 决策钩子 ====================
 
@@ -500,10 +547,11 @@ class AntiFloodPlugin(Star):
     async def intercept(self, event: AstrMessageEvent):
         """全局监听：选择性忽略 bot 消息 + 防刷屏检测"""
         self._msg_counter += 1
-        if self._msg_counter % 100 == 0:
-            self._cleanup()
-            self._save_stats()
         try:
+            # 定期清理：配置脏值或单键异常不得影响消息处理
+            if self._msg_counter % 100 == 0:
+                self._cleanup()
+                self._save_stats()
             sender_id = str(event.get_sender_id())
             if not sender_id:
                 return
@@ -568,10 +616,7 @@ class AntiFloodPlugin(Star):
                 return
 
             now = time.time()
-            content = event.message_str.strip()
-            # 剥离 CQ 码（@ 不同人/图片地址等不应计入重复内容比较）
-            if content:
-                content = re.sub(r"\[CQ:[^\]]*\]", "", content).strip()
+            content = self._normalize_content(event.message_str)
             flood_hit, repeat_hit = self._check_flood(
                 event, sender_id, content, now
             )
@@ -584,20 +629,20 @@ class AntiFloodPlugin(Star):
                     if not rec:
                         rec = {"count": 0, "first_ts": now, "block_until": 0}
                         self._flood_levels[user_key] = rec
-                    elif now - rec["first_ts"] > float(
-                        self.config.get("gradient_interval_seconds", 300)
+                    elif now - rec["first_ts"] > self._safe_float(
+                        self.config.get("gradient_interval_seconds", 300), 300
                     ):
                         rec.update(
                             {"count": 0, "first_ts": now, "block_until": 0}
                         )
                     rec["count"] += 1
-                    hard_threshold = int(
-                        self.config.get("gradient_hard_threshold", 3)
+                    hard_threshold = self._safe_int(
+                        self.config.get("gradient_hard_threshold", 3), 3
                     )
                     if rec["count"] >= hard_threshold:
                         # 硬拦截 + 冷却期
-                        rec["block_until"] = now + float(
-                            self.config.get("gradient_block_minutes", 10)
+                        rec["block_until"] = now + self._safe_float(
+                            self.config.get("gradient_block_minutes", 10), 10
                         ) * 60
                         self.stats["flood_blocked"] += 1
                         if self.config.get("log_ignored", True):
@@ -612,8 +657,8 @@ class AntiFloodPlugin(Star):
                         action = "ask_llm"
                 if action == "ask_llm":
                     # 交给 LLM 自主决定是否回答：记录提醒目标并放行消息
-                    self._llm_ask_targets[user_key] = now + float(
-                        self.config.get("ask_llm_window_seconds", 60)
+                    self._llm_ask_targets[user_key] = now + self._safe_float(
+                        self.config.get("ask_llm_window_seconds", 60), 60
                     )
                     if self.config.get("log_ignored", True):
                         logger.info(
@@ -748,10 +793,14 @@ class AntiFloodPlugin(Star):
         if minutes.strip().isdigit():
             duration = max(1, int(minutes))
         else:
-            duration = int(self.config.get("gradient_block_minutes", 10))
+            duration = self._safe_int(
+                self.config.get("gradient_block_minutes", 10), 10
+            )
         user_key = self._user_key(event, user_id)
         self._flood_levels[user_key] = {
-            "count": int(self.config.get("gradient_hard_threshold", 3)),
+            "count": self._safe_int(
+                self.config.get("gradient_hard_threshold", 3), 3
+            ),
             "first_ts": time.time(),
             "block_until": time.time() + duration * 60,
         }

@@ -3,6 +3,7 @@
 import sys
 import time
 import unittest
+from collections import deque
 
 sys.path.insert(0, r"D:\astrbot\data\plugins\astrbot_plugin_anti_flood")
 sys.path.insert(0, r"D:\astrbot\data\plugins")
@@ -150,11 +151,19 @@ class TestBotFilter(unittest.TestCase):
     def test_flood_key_user_and_group(self):
         ev = FakeEvent(group_id="10001", sender_id="42")
         p = make_plugin()
-        self.assertEqual(p._flood_key(ev, "42"), "onebot:user:42")
+        self.assertEqual(p._flood_key(ev, "42"), "onebot:group:10001:user:42")
         p2 = make_plugin(flood_per_user=False)
         self.assertEqual(p2._flood_key(ev, "42"), "onebot:group:10001")
         ev2 = FakeEvent(group_id="", sender_id="42")
         self.assertEqual(p2._flood_key(ev2, "42"), "onebot:private:42")
+
+    def test_flood_key_isolates_groups_for_same_user(self):
+        # A1 修复：同一用户在不同群的刷屏记录互不串扰
+        ev_a = FakeEvent(group_id="10001", sender_id="42")
+        ev_b = FakeEvent(group_id="10002", sender_id="42")
+        p = make_plugin()
+        self.assertNotEqual(p._flood_key(ev_a, "42"), p._flood_key(ev_b, "42"))
+        self.assertNotEqual(p._user_key(ev_a, "42"), p._user_key(ev_b, "42"))
 
     def test_exempt_admin_and_whitelist(self):
         p = make_plugin(whitelist_ids="888")
@@ -235,6 +244,62 @@ class TestFloodCheck(unittest.TestCase):
         # 另一用户不受影响
         hit, _ = p._check_flood(ev2, "u2", "d", now + 0.3)
         self.assertFalse(hit)
+
+    def test_dirty_config_falls_back(self):
+        # A2 修复：脏配置不影响检测与清理
+        p = make_plugin(
+            flood_window_seconds="abc",
+            flood_max_messages="x",
+            repeat_window_seconds=None,
+            repeat_max_count="",
+            gradient_interval_seconds="bad",
+            gradient_hard_threshold=None,
+            gradient_block_minutes="",
+            ask_llm_window_seconds="zz",
+            detect_cache_seconds="nan!",
+        )
+        self.assertEqual(p._safe_float(p.config.get("flood_window_seconds"), 5), 5.0)
+        self.assertEqual(p._safe_int(p.config.get("flood_max_messages", 5), 5), 5)
+        self.assertGreaterEqual(p._max_window(), 0)
+        ev = FakeEvent(group_id="g1", sender_id="u1")
+        hit, _ = p._check_flood(ev, "u1", "a", time.time())
+        self.assertFalse(hit)
+        p._cleanup()  # 不得抛异常
+
+    def test_out_of_order_timestamps(self):
+        # A3 修复：并发乱序时间戳插入后队列仍有序，窗口统计正确
+        ev = FakeEvent(group_id="g1", sender_id="u1")
+        p = make_plugin(flood_max_messages=2, flood_window_seconds=20)
+        now = 1000.0
+        # 先到达较晚时间戳，再到达较早时间戳（乱序）
+        p._check_flood(ev, "u1", "a", now + 10)
+        p._check_flood(ev, "u1", "b", now)
+        dq = p._flood_history[p._flood_key(ev, "u1")]
+        self.assertEqual(list(dq), sorted(dq))
+        # 20 秒窗口内 3 条记录 → 命中
+        hit, _ = p._check_flood(ev, "u1", "c", now + 11)
+        self.assertTrue(hit)
+        # 30 秒后最早记录超出窗口被弹出，队首为窗口内最早
+        p._check_flood(ev, "u1", "d", now + 30)
+        dq = p._flood_history[p._flood_key(ev, "u1")]
+        self.assertEqual(list(dq), sorted(dq))
+        self.assertGreaterEqual(dq[0], now + 30 - 20)
+
+    def test_at_prefix_stripped_from_content(self):
+        # A6 修复：纯文本 @ 提及前缀不参与重复内容比较
+        ev = FakeEvent(group_id="g1", sender_id="u1")
+        p = make_plugin(repeat_max_count=1)
+        content = p._normalize_content("@bot 晚上好")
+        self.assertEqual(content, "晚上好")
+
+    def test_cleanup_never_raises(self):
+        # A2 修复：脏数据 + 空历史时 _cleanup 不抛异常
+        p = make_plugin()
+        p._flood_history["onebot:group:g:user:u"] = deque([time.time() - 9999])
+        p._bot_cache["x"] = (True, time.time() - 1)
+        p._cleanup()
+        self.assertNotIn("onebot:group:g:user:u", p._flood_history)
+        self.assertNotIn("x", p._bot_cache)
 
 
 if __name__ == "__main__":
