@@ -1,4 +1,4 @@
-"""防刷屏与 Bot 消息过滤插件。
+﻿"""防刷屏与 Bot 消息过滤插件。
 
 功能：
 1. 选择性忽略其他 bot 的消息（手动名单 + 昵称正则 + 协议端自动探测 + 手动标记）
@@ -44,7 +44,7 @@ _ACTION_DESC = {
 }
 
 
-@register("astrbot_plugin_anti_flood", "Administrator", "防刷屏与 Bot 消息过滤器", "1.1.0")
+@register("astrbot_plugin_anti_flood", "Administrator", "防刷屏与 Bot 消息过滤器", "1.1.1")
 class AntiFloodPlugin(Star):
     """防止自动刷屏，选择性忽略其他 bot 的消息。"""
 
@@ -53,6 +53,8 @@ class AntiFloodPlugin(Star):
         self.config = config or {}
         # 协议端探测结果缓存: {user_id: (是否为 bot, 过期时间戳)}
         self._bot_cache: dict[str, tuple[bool, float]] = {}
+        # 配置解析缓存: {key: (时间戳, 值)}，TTL 内避免每条消息重复 split/compile
+        self._cfg_cache: dict[str, tuple[float, object]] = {}
         # 管理员手动标记的 bot 名单: {user_id: {"name": str, "ts": float}}
         self.marked_bots: dict[str, dict] = {}
         # 刷屏检测记录: {统计键: 时间戳队列}
@@ -82,14 +84,22 @@ class AntiFloodPlugin(Star):
     # ==================== 配置辅助 ====================
 
     def _bot_id_set(self) -> set[str]:
-        """解析手动配置的 bot 名单"""
+        """解析手动配置的 bot 名单（带 TTL 缓存，配置修改后自动失效）"""
         raw = str(self.config.get("bot_ids", "") or "")
-        return {x.strip() for x in raw.split(",") if x.strip()}
+        ts, cached = self._cfg_cache.get("bot_ids", (0, None))
+        if cached is not None and time.time() - ts < self._cache_ttl():
+            return cached
+        val = {x.strip() for x in raw.split(",") if x.strip()}
+        self._cfg_cache["bot_ids"] = (time.time(), val)
+        return val
 
     def _name_patterns(self) -> list[re.Pattern]:
-        """编译昵称/ID 正则列表（每次解析以支持热修改）"""
-        patterns: list[re.Pattern] = []
+        """编译昵称/ID 正则列表（带 TTL 缓存，配置修改后自动失效）"""
         raw = str(self.config.get("bot_name_patterns", "") or "")
+        ts, cached = self._cfg_cache.get("bot_name_patterns", (0, None))
+        if cached is not None and time.time() - ts < self._cache_ttl():
+            return cached
+        patterns: list[re.Pattern] = []
         for p in raw.split(","):
             p = p.strip()
             if not p:
@@ -98,6 +108,7 @@ class AntiFloodPlugin(Star):
                 patterns.append(re.compile(p, re.IGNORECASE))
             except re.error as e:
                 logger.error(f"无效的正则表达式 {p!r}: {e}")
+        self._cfg_cache["bot_name_patterns"] = (time.time(), patterns)
         return patterns
 
     def _cache_ttl(self) -> float:
@@ -113,10 +124,13 @@ class AntiFloodPlugin(Star):
     def _parse_group_overrides(self) -> dict[str, dict]:
         """解析按群覆盖配置，格式每行：群号:flood_action[:bot_filter_mode]。
 
-        每次调用实时解析，支持 WebUI 修改后热更新（无需重载插件）。
+        带 TTL 缓存：WebUI 修改配置后最多缓存 detect_cache_seconds 秒。
         """
-        overrides: dict[str, dict] = {}
         raw = str(self.config.get("group_overrides", "") or "")
+        ts, cached = self._cfg_cache.get("group_overrides", (0, None))
+        if cached is not None and time.time() - ts < self._cache_ttl():
+            return cached
+        overrides: dict[str, dict] = {}
         for line in raw.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
@@ -136,6 +150,7 @@ class AntiFloodPlugin(Star):
                 "flood_action": action,
                 "bot_filter_mode": mode,
             }
+        self._cfg_cache["group_overrides"] = (time.time(), overrides)
         return overrides
 
     def _effective_action(self, group_id) -> str:
@@ -547,6 +562,9 @@ class AntiFloodPlugin(Star):
 
             now = time.time()
             content = event.message_str.strip()
+            # 剥离 CQ 码（@ 不同人/图片地址等不应计入重复内容比较）
+            if content:
+                content = re.sub(r"\[CQ:[^\]]*\]", "", content).strip()
             flood_hit, repeat_hit = self._check_flood(
                 event, sender_id, content, now
             )
@@ -661,7 +679,12 @@ class AntiFloodPlugin(Star):
             f"- 昵称正则: "
             f"{str(self.config.get('bot_name_patterns', '') or '').strip() or '无'}",
             "",
-            "【拦截统计】(重启后清零)",
+            "【拦截统计】"
+            + (
+                "（已持久化，重启后保留）"
+                if self.config.get("persist_stats", True)
+                else "（重启后清零）"
+            ),
             f"- 忽略 bot 消息: {self.stats['bot_ignored']}",
             f"- 拦截条数超限: {self.stats['flood_blocked']}",
             f"- 拦截重复内容: {self.stats['repeat_blocked']}",

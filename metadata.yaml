@@ -1,5 +1,5 @@
-name: astrbot_plugin_anti_flood
-version: 1.1.0
+﻿name: astrbot_plugin_anti_flood
+version: 1.1.1
 author: Administrator
 desc: 防止自动刷屏，选择性忽略其他 bot 的消息。支持频率限流、重复内容拦截、自动识别其他机器人并静默忽略、梯度处置（拦截→ask_llm→冷却）、按群覆盖配置、AI 隐蔽指令 <silent /> 本地决策不发送、拦截统计持久化。
 repo: https://github.com/AstrBotDevs/AstrBot
