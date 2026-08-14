@@ -35,6 +35,11 @@
 3. **拦截统计**：记录忽略/拦截次数，可用 `/af status` 查看；`persist_stats` 开启时
    统计持久化到 plugin_data，重启不丢失
 
+4. **拦截自动上报**：拦截刷屏消息时向 `report_admins` 配置的管理员会话推送摘要
+   （时间 / 群号 / 用户 / 原因 / 处置 / 内容），同用户按 `report_throttle_minutes`
+   节流，避免持续刷屏时提醒消息刷屏；`report_enable` 关闭或未配置 `report_admins`
+   时不发送
+
 ## 安装
 
 将本目录复制到 AstrBot 的 `data/plugins/` 下，然后在 WebUI 插件管理中启用并重载插件。

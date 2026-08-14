@@ -22,6 +22,7 @@ import time
 from collections import defaultdict, deque
 
 from astrbot.api import AstrBotConfig, logger
+from astrbot.api.all import MessageChain, Plain
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.event.filter import EventMessageType, PermissionType
 from astrbot.api.provider import ProviderRequest
@@ -85,6 +86,8 @@ class AntiFloodPlugin(Star):
         self._llm_ask_targets: dict[str, float] = {}
         # 梯度处置记录: {user_id: {"count": int, "first_ts": float, "block_until": float}}
         self._flood_levels: dict[str, dict] = {}
+        # 上报节流记录: {user_id: 上次上报时间戳}
+        self._report_log: dict[str, float] = {}
         self._msg_counter = 0
         self._load_marked()
         self._load_stats()
@@ -455,8 +458,67 @@ class AntiFloodPlugin(Star):
                     )
                 ):
                     del self._flood_levels[uid]
+            for uid in list(self._report_log.keys()):
+                if now - self._report_log[uid] > 86400:
+                    del self._report_log[uid]
         except Exception as e:
             logger.error(f"清理检测记录失败: {e}")
+
+    # ==================== 拦截上报 ====================
+
+    def _report_admins(self) -> list[str]:
+        """解析上报目标会话（report_admins，逗号分隔的 unified_msg_origin）"""
+        raw = str(self.config.get("report_admins", "") or "")
+        return [x.strip() for x in raw.replace("，", ",").split(",") if x.strip()]
+
+    def _should_report(self, user_key: str, now: float) -> bool:
+        """上报节流：同用户 throttled 秒内最多上报一次"""
+        if not self.config.get("report_enable", True):
+            return False
+        if not self._report_admins():
+            return False
+        last = self._report_log.get(user_key, 0)
+        throttle = self._safe_float(
+            self.config.get("report_throttle_minutes", 5), 5
+        ) * 60
+        if now - last < throttle:
+            return False
+        return True
+
+    async def _send_report(
+        self,
+        event: AstrMessageEvent,
+        sender_id: str,
+        sender_name: str,
+        group_id: str,
+        content: str,
+        reason: str,
+        detail: str = "",
+    ):
+        """向配置的管理员会话推送拦截摘要（失败仅记录日志，不影响主流程）"""
+        user_key = self._user_key(event, sender_id)
+        now = time.time()
+        if not self._should_report(user_key, now):
+            return
+        self._report_log[user_key] = now
+        lines = [
+            "🚨 防刷屏拦截提醒",
+            f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"群号: {group_id or '私聊'}",
+            f"用户: {sender_name}（{sender_id}）",
+            f"原因: {reason}",
+            f"处置: {detail or '已拦截该条消息'}",
+            f"内容: {(content or '(无)')[:100]}",
+        ]
+        text = "\n".join(lines)
+        chain = MessageChain([Plain(text)])
+        for session in self._report_admins():
+            try:
+                if self.context is None:
+                    continue
+                await self.context.send_message(session, chain)
+            except Exception as e:
+                logger.warning(f"拦截上报发送失败 {session}: {e}")
 
     # ==================== LLM 决策钩子 ====================
 
@@ -578,6 +640,11 @@ class AntiFloodPlugin(Star):
                         f"冷却期内拦截刷屏用户: {sender_name}({sender_id}) "
                         f"剩余 {int((rec['block_until'] - now0) / 60)} 分钟"
                     )
+                await self._send_report(
+                    event, sender_id, sender_name, group_id_str,
+                    event.message_str, "冷却期内刷屏（梯度硬拦截）",
+                    f"冷却中，剩余约 {int((rec['block_until'] - now0) / 60)} 分钟",
+                )
                 event.stop_event()
                 return
 
@@ -650,6 +717,12 @@ class AntiFloodPlugin(Star):
                                 f"刷屏命中 {rec['count']} 次，进入冷却期硬拦截: "
                                 f"{sender_name}({sender_id}) 内容={content[:50]}"
                             )
+                        await self._send_report(
+                            event, sender_id, sender_name, group_id_str, content,
+                            f"反复刷屏（{rec['count']} 次）",
+                            "已硬拦截，进入冷却期（"
+                            f"{self._safe_float(self.config.get('gradient_block_minutes', 10), 10)} 分钟）",
+                        )
                         event.stop_event()
                         return
                     if rec["count"] >= 2 and action == "silence":
@@ -675,6 +748,9 @@ class AntiFloodPlugin(Star):
                         f"已拦截刷屏消息 ({reason}): {sender_name}({sender_id}) "
                         f"内容={content[:50]}"
                     )
+                await self._send_report(
+                    event, sender_id, sender_name, group_id_str, content, reason
+                )
                 event.stop_event()
         except Exception as e:
             logger.error(f"拦截处理出错: {e}")

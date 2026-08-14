@@ -5,6 +5,7 @@ import sys
 import time
 import unittest
 from collections import deque
+from types import SimpleNamespace
 
 sys.path.insert(0, r"D:\astrbot\data\plugins\astrbot_plugin_anti_flood")
 sys.path.insert(0, r"D:\astrbot\data\plugins")
@@ -70,6 +71,9 @@ class FakeEvent:
 
     def is_admin(self):
         return self._is_admin
+
+    def stop_event(self):
+        pass
 
 
 class TestConfigParsing(unittest.TestCase):
@@ -430,6 +434,100 @@ class TestLlmAskMode(unittest.TestCase):
             return p._flood_levels[key]["block_until"] > time.time()
 
         self.assertTrue(asyncio.run(run()))
+
+
+class TestReport(unittest.TestCase):
+    """拦截自动上报：目标解析、节流、触发链路"""
+
+    def _plugin(self, **overrides):
+        return make_plugin(
+            report_enable=True,
+            report_admins="onebot:PrivateMessage:10001, onebot:PrivateMessage:10002",
+            report_throttle_minutes=5,
+            enable_repeat_check=True,
+            repeat_max_count=1,
+            repeat_window_seconds=60,
+            flood_max_messages=999,
+            **overrides,
+        )
+
+    def test_report_admins_parsing(self):
+        p = self._plugin()
+        self.assertEqual(
+            p._report_admins(),
+            ["onebot:PrivateMessage:10001", "onebot:PrivateMessage:10002"],
+        )
+        p2 = make_plugin(report_admins="")
+        self.assertEqual(p2._report_admins(), [])
+
+    def test_should_report_requires_admins(self):
+        p = make_plugin(report_enable=True, report_admins="")
+        self.assertFalse(p._should_report("k", time.time()))
+        p2 = make_plugin(report_enable=False, report_admins="onebot:x:1")
+        self.assertFalse(p2._should_report("k", time.time()))
+
+    def test_should_report_throttled(self):
+        p = make_plugin(
+            report_enable=True,
+            report_admins="onebot:x:1",
+            report_throttle_minutes=5,
+        )
+        now = time.time()
+        self.assertTrue(p._should_report("k", now))
+        p._report_log["k"] = now
+        self.assertFalse(p._should_report("k", now + 60))
+        # 超过节流间隔后恢复
+        self.assertTrue(p._should_report("k", now + 301))
+
+    def test_intercept_sends_report_once_per_throttle(self):
+        p = self._plugin(flood_gradient=False)
+        sent = []
+
+        async def fake_send(session, chain):
+            sent.append((session, "".join(c.text for c in chain.chain)))
+            return True
+
+        p.context = SimpleNamespace(send_message=fake_send)
+        p._is_exempt = lambda e, s: False
+        ev = FakeEvent(group_id="g1", sender_id="u1", sender_name="小明", message_str="刷屏内容")
+
+        async def run():
+            for _ in range(4):
+                await p.intercept(ev)
+            return sent
+
+        sent = asyncio.run(run())
+        # 同用户节流内只上报一次，且推送到全部配置会话
+        self.assertEqual(len(sent), 2)
+        text = sent[0][1]
+        self.assertIn("防刷屏拦截提醒", text)
+        self.assertIn("小明", text)
+        self.assertIn("重复内容", text)
+        self.assertIn("刷屏内容", text)
+
+    def test_report_covers_cooldown_hits(self):
+        # 冷却期内拦截也会触发上报（再次验证节流独立生效）
+        p = self._plugin()
+        sent = []
+
+        async def fake_send(session, chain):
+            sent.append(session)
+            return True
+
+        p.context = SimpleNamespace(send_message=fake_send)
+        p._is_exempt = lambda e, s: False
+        ev = FakeEvent(group_id="g1", sender_id="u1", sender_name="小明", message_str="aa")
+        p._flood_levels[p._user_key(ev, "u1")] = {
+            "count": 9, "first_ts": time.time(), "block_until": time.time() + 600,
+        }
+        # 清空节流记录，确保冷却分支上报
+        p._report_log.clear()
+
+        async def run():
+            await p.intercept(ev)
+            return sent
+
+        self.assertEqual(len(asyncio.run(run())), 2)
 
 
 if __name__ == "__main__":

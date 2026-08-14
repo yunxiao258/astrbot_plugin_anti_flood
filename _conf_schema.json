@@ -168,5 +168,23 @@
         "type": "bool",
         "hint": "关闭可减少日志输出。",
         "default": true
+    },
+    "report_enable": {
+        "description": "拦截自动上报",
+        "type": "bool",
+        "hint": "开启后，拦截刷屏消息时向 report_admins 指定的会话推送拦截摘要（同用户节流，见 report_throttle_minutes）。",
+        "default": true
+    },
+    "report_admins": {
+        "description": "上报目标会话 (unified_msg_origin)",
+        "type": "string",
+        "hint": "接收拦截提醒的会话，多个用英文逗号(,)分隔。留空则不上报。示例：onebot:PrivateMessage:10001",
+        "default": ""
+    },
+    "report_throttle_minutes": {
+        "description": "上报节流间隔 (分钟)",
+        "type": "int",
+        "hint": "同一用户在节流间隔内最多上报一次，避免持续刷屏时提醒消息刷屏。",
+        "default": 5
     }
 }
