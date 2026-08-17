@@ -118,7 +118,12 @@ class AntiFloodPlugin(Star):
         if isinstance(key_value, (int, float)):
             return bool(key_value)
         if isinstance(key_value, str):
-            return key_value.strip().lower() in ("1", "true", "yes", "on")
+            s = key_value.strip().lower()
+            if s in ("1", "true", "yes", "on"):
+                return True
+            if s in ("0", "false", "no", "off"):
+                return False
+            return bool(default)
         return bool(default)
 
     def _bot_id_set(self) -> set[str]:
@@ -641,7 +646,28 @@ class AntiFloodPlugin(Star):
             group_id_str = str(group_id) if group_id else ""
             user_key = self._user_key(event, sender_id)
 
-            # === 0. 总开关与豁免检查（豁免优先于冷却拦截，管理员不受冷却影响） ===
+            # === 0. 选择性忽略其他 bot 的消息（豁免不影响 bot 过滤） ===
+            if self._safe_bool(self.config.get("enable_bot_filter"), True):
+                mode = self._effective_mode(group_id_str)
+                # manual_only 模式仅查手动名单，无需协议端探测
+                if mode == "manual_only":
+                    is_bot = self._in_manual_list(sender_id, sender_name)
+                else:
+                    is_bot = await self._is_bot(event, sender_id, sender_name)
+                if is_bot and self._should_ignore_bot_message(
+                    event, sender_id, sender_name, mode
+                ):
+                    self.stats["bot_ignored"] += 1
+                    if self._safe_bool(self.config.get("log_ignored"), True):
+                        logger.info(
+                            f"已忽略 bot 消息"
+                            f"({_MODE_DESC.get(mode, mode)}): "
+                            f"{sender_name}({sender_id})"
+                        )
+                    event.stop_event()
+                    return
+
+            # === 1. 总开关与豁免检查（豁免优先于冷却拦截，管理员不受冷却影响） ===
             flood_on = self._safe_bool(
                 self.config.get("enable_flood_check"), True
             )
@@ -658,7 +684,7 @@ class AntiFloodPlugin(Star):
             ) and getattr(event, "is_at_or_wake_command", False):
                 return
 
-            # === 1. 梯度硬拦截冷却期检查 ===
+            # === 2. 梯度硬拦截冷却期检查 ===
             rec = self._flood_levels.get(user_key)
             now0 = time.time()
             if rec:
@@ -681,28 +707,7 @@ class AntiFloodPlugin(Star):
                     event.stop_event()
                     return
 
-            # === 1. 选择性忽略其他 bot 的消息 ===
-            if self._safe_bool(self.config.get("enable_bot_filter"), True):
-                mode = self._effective_mode(group_id_str)
-                # manual_only 模式仅查手动名单，无需协议端探测
-                if mode == "manual_only":
-                    is_bot = self._in_manual_list(sender_id, sender_name)
-                else:
-                    is_bot = await self._is_bot(event, sender_id, sender_name)
-                if is_bot and self._should_ignore_bot_message(
-                    event, sender_id, sender_name, mode
-                ):
-                    self.stats["bot_ignored"] += 1
-                    if self._safe_bool(self.config.get("log_ignored"), True):
-                        logger.info(
-                            f"已忽略 bot 消息"
-                            f"({_MODE_DESC.get(mode, mode)}): "
-                            f"{sender_name}({sender_id})"
-                        )
-                    event.stop_event()
-                    return
-
-            # === 2. 防刷屏检测 ===
+            # === 3. 防刷屏检测 ===
             now = time.time()
             content = self._normalize_content(event.message_str)
             flood_hit, repeat_hit = self._check_flood(
@@ -788,10 +793,10 @@ class AntiFloodPlugin(Star):
         """查看插件状态与拦截统计"""
         lines = [
             "【防刷屏插件状态】",
-            f"- Bot 过滤: {'开启' if self.config.get('enable_bot_filter', True) else '关闭'}",
+            f"- Bot 过滤: {'开启' if self._safe_bool(self.config.get('enable_bot_filter'), True) else '关闭'}",
             f"- 过滤模式: "
             f"{_MODE_DESC.get(str(self.config.get('bot_filter_mode', _DFT_BOT_FILTER_MODE)), '未知')}",
-            f"- 自动探测: {'开启' if self.config.get('auto_detect_bot', True) else '关闭'}",
+            f"- 自动探测: {'开启' if self._safe_bool(self.config.get('auto_detect_bot'), True) else '关闭'}",
             f"- 条数限制: "
             f"{self.config.get('flood_window_seconds', _DFT_FLOOD_WINDOW)} 秒内 "
             f"{self.config.get('flood_max_messages', 5)} 条"
@@ -815,7 +820,7 @@ class AntiFloodPlugin(Star):
                 if self.config.get("flood_action") == "ask_llm"
                 else ""
             ),
-            f"- 梯度处置: {'开启' if self.config.get('flood_gradient', True) else '关闭'}"
+            f"- 梯度处置: {'开启' if self._safe_bool(self.config.get('flood_gradient'), True) else '关闭'}"
             f"（{self.config.get('gradient_interval_seconds', 300)} 秒内 "
             f"{self.config.get('gradient_hard_threshold', 3)} 次进冷却 "
             f"{self.config.get('gradient_block_minutes', 10)} 分钟）",

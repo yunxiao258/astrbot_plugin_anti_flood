@@ -452,6 +452,40 @@ class TestLlmAskMode(unittest.TestCase):
         asyncio.run(p.intercept(ev_white))
         self.assertEqual(p.stats["flood_blocked"], 0)
 
+    def test_bot_filter_runs_before_exempt_and_at_skip(self):
+        # bot 过滤必须优先于豁免/@跳过：白名单或 @ 消息中的 bot 仍应被过滤（trigger_only 核心）
+        p = make_plugin(
+            enable_bot_filter=True,
+            bot_filter_mode="trigger_only",
+            ignore_admin=True,
+            whitelist_ids="777",
+            skip_flood_when_at=True,
+            bot_ids="777",
+        )
+        # 豁免用户（白名单）+ @ 消息 + bot → 仍应被 bot 过滤拦截
+        ev = FakeEvent(
+            group_id="g1", sender_id="777", sender_name="bot-9", at_or_wake=True
+        )
+        asyncio.run(p.intercept(ev))
+        self.assertEqual(p.stats["bot_ignored"], 1)
+        # 非 bot 的 @ 消息 → 不被过滤（bot_ignored 不变），且 @ 跳过刷屏检测
+        ev2 = FakeEvent(group_id="g1", sender_id="888", at_or_wake=True)
+        asyncio.run(p.intercept(ev2))
+        self.assertEqual(p.stats["bot_ignored"], 1)
+
+    def test_bot_filter_works_when_flood_disabled(self):
+        # 只关刷屏开关（flood+repeat 全关）时 bot 过滤仍应生效
+        p = make_plugin(
+            enable_bot_filter=True,
+            bot_filter_mode="manual_only",
+            bot_ids="111",
+            enable_flood_check=False,
+            enable_repeat_check=False,
+        )
+        ev = FakeEvent(group_id="g1", sender_id="111", sender_name="b", at_or_wake=False)
+        asyncio.run(p.intercept(ev))
+        self.assertEqual(p.stats["bot_ignored"], 1)
+
     def test_cooldown_expiry_decays_count(self):
         # 冷却到期后衰减梯度计数，避免解除后立刻再次硬拦截
         p = make_plugin(flood_gradient=True, gradient_hard_threshold=3)
