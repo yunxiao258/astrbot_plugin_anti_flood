@@ -110,6 +110,17 @@ class AntiFloodPlugin(Star):
         except (TypeError, ValueError):
             return int(default)
 
+    @staticmethod
+    def _safe_bool(key_value, default: bool) -> bool:
+        """安全布尔转换：WebUI 脏值（如 "true"/"1"/"yes"/"on"）回退默认"""
+        if isinstance(key_value, bool):
+            return key_value
+        if isinstance(key_value, (int, float)):
+            return bool(key_value)
+        if isinstance(key_value, str):
+            return key_value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(default)
+
     def _bot_id_set(self) -> set[str]:
         """解析手动配置的 bot 名单（带 TTL 缓存，配置修改后自动失效）"""
         raw = str(self.config.get("bot_ids", "") or "")
@@ -218,7 +229,7 @@ class AntiFloodPlugin(Star):
 
     def _save_stats(self):
         """持久化拦截统计"""
-        if not self.config.get("persist_stats", True):
+        if not self._safe_bool(self.config.get("persist_stats"), True):
             return
         try:
             path = self._stats_path()
@@ -272,7 +283,7 @@ class AntiFloodPlugin(Star):
         """判断发送者是否为 bot：手动判定优先（即时生效），再走协议端探测（带缓存）"""
         if self._in_manual_list(user_id, sender_name):
             return True
-        if not self.config.get("auto_detect_bot", True):
+        if not self._safe_bool(self.config.get("auto_detect_bot"), True):
             return False
         now = time.time()
         cached = self._bot_cache.get(user_id)
@@ -350,7 +361,7 @@ class AntiFloodPlugin(Star):
     def _flood_key(self, event: AstrMessageEvent, sender_id: str) -> str:
         """刷屏检测的统计维度：按用户或按会话（均带平台与群维度）"""
         platform = self._platform_of(event)
-        if self.config.get("flood_per_user", True):
+        if self._safe_bool(self.config.get("flood_per_user"), True):
             return self._user_key(event, sender_id)
         group_id = event.get_group_id()
         if group_id:
@@ -359,7 +370,7 @@ class AntiFloodPlugin(Star):
 
     def _is_exempt(self, event: AstrMessageEvent, sender_id: str) -> bool:
         """管理员与白名单用户豁免刷屏检测"""
-        if self.config.get("ignore_admin", True) and event.is_admin():
+        if self._safe_bool(self.config.get("ignore_admin"), True) and event.is_admin():
             return True
         whitelist = {
             x.strip()
@@ -375,7 +386,7 @@ class AntiFloodPlugin(Star):
         flood_hit = False
         repeat_hit = False
         # 1. 滑动窗口条数限制
-        if self.config.get("enable_flood_check", True):
+        if self._safe_bool(self.config.get("enable_flood_check"), True):
             window = self._safe_float(
                 self.config.get("flood_window_seconds", _DFT_FLOOD_WINDOW),
                 _DFT_FLOOD_WINDOW,
@@ -388,7 +399,7 @@ class AntiFloodPlugin(Star):
                 self._push_sorted(dq, now)
                 flood_hit = len(dq) > limit
         # 2. 相同内容重复限制
-        if self.config.get("enable_repeat_check", True):
+        if self._safe_bool(self.config.get("enable_repeat_check"), True):
             window = self._safe_float(
                 self.config.get("repeat_window_seconds", _DFT_REPEAT_WINDOW),
                 _DFT_REPEAT_WINDOW,
@@ -473,7 +484,7 @@ class AntiFloodPlugin(Star):
 
     def _should_report(self, user_key: str, now: float) -> bool:
         """上报节流：同用户 throttled 秒内最多上报一次"""
-        if not self.config.get("report_enable", True):
+        if not self._safe_bool(self.config.get("report_enable"), True):
             return False
         if not self._report_admins():
             return False
@@ -622,7 +633,7 @@ class AntiFloodPlugin(Star):
             if self_id and sender_id == self_id:
                 return
             # 仅群聊模式
-            if self.config.get("only_group", False) and not event.get_group_id():
+            if self._safe_bool(self.config.get("only_group"), False) and not event.get_group_id():
                 return
 
             sender_name = event.get_sender_name() or sender_id
@@ -630,26 +641,48 @@ class AntiFloodPlugin(Star):
             group_id_str = str(group_id) if group_id else ""
             user_key = self._user_key(event, sender_id)
 
-            # === 0. 梯度硬拦截冷却期检查 ===
-            rec = self._flood_levels.get(user_key)
-            now0 = time.time()
-            if rec and rec.get("block_until", 0) > now0:
-                self.stats["flood_blocked"] += 1
-                if self.config.get("log_ignored", True):
-                    logger.info(
-                        f"冷却期内拦截刷屏用户: {sender_name}({sender_id}) "
-                        f"剩余 {int((rec['block_until'] - now0) / 60)} 分钟"
-                    )
-                await self._send_report(
-                    event, sender_id, sender_name, group_id_str,
-                    event.message_str, "冷却期内刷屏（梯度硬拦截）",
-                    f"冷却中，剩余约 {int((rec['block_until'] - now0) / 60)} 分钟",
-                )
-                event.stop_event()
+            # === 0. 总开关与豁免检查（豁免优先于冷却拦截，管理员不受冷却影响） ===
+            flood_on = self._safe_bool(
+                self.config.get("enable_flood_check"), True
+            )
+            repeat_on = self._safe_bool(
+                self.config.get("enable_repeat_check"), True
+            )
+            if not flood_on and not repeat_on:
+                return
+            if self._is_exempt(event, sender_id):
+                return
+            # 被 @ 或带唤醒前缀的主动交互消息不参与刷屏检测
+            if self._safe_bool(
+                self.config.get("skip_flood_when_at"), True
+            ) and getattr(event, "is_at_or_wake_command", False):
                 return
 
+            # === 1. 梯度硬拦截冷却期检查 ===
+            rec = self._flood_levels.get(user_key)
+            now0 = time.time()
+            if rec:
+                if rec.get("block_until", 0) and rec["block_until"] <= now0:
+                    # 冷却到期：衰减梯度计数，避免解除后立刻再次硬拦截
+                    rec["count"] = max(1, rec.get("count", 0) // 2)
+                    rec["block_until"] = 0
+                elif rec.get("block_until", 0) > now0:
+                    self.stats["flood_blocked"] += 1
+                    if self._safe_bool(self.config.get("log_ignored"), True):
+                        logger.info(
+                            f"冷却期内拦截刷屏用户: {sender_name}({sender_id}) "
+                            f"剩余 {int((rec['block_until'] - now0) / 60)} 分钟"
+                        )
+                    await self._send_report(
+                        event, sender_id, sender_name, group_id_str,
+                        event.message_str, "冷却期内刷屏（梯度硬拦截）",
+                        f"冷却中，剩余约 {int((rec['block_until'] - now0) / 60)} 分钟",
+                    )
+                    event.stop_event()
+                    return
+
             # === 1. 选择性忽略其他 bot 的消息 ===
-            if self.config.get("enable_bot_filter", True):
+            if self._safe_bool(self.config.get("enable_bot_filter"), True):
                 mode = self._effective_mode(group_id_str)
                 # manual_only 模式仅查手动名单，无需协议端探测
                 if mode == "manual_only":
@@ -660,7 +693,7 @@ class AntiFloodPlugin(Star):
                     event, sender_id, sender_name, mode
                 ):
                     self.stats["bot_ignored"] += 1
-                    if self.config.get("log_ignored", True):
+                    if self._safe_bool(self.config.get("log_ignored"), True):
                         logger.info(
                             f"已忽略 bot 消息"
                             f"({_MODE_DESC.get(mode, mode)}): "
@@ -670,18 +703,6 @@ class AntiFloodPlugin(Star):
                     return
 
             # === 2. 防刷屏检测 ===
-            flood_on = self.config.get("enable_flood_check", True)
-            repeat_on = self.config.get("enable_repeat_check", True)
-            if not flood_on and not repeat_on:
-                return
-            if self._is_exempt(event, sender_id):
-                return
-            # 被 @ 或带唤醒前缀的主动交互消息不参与刷屏检测
-            if self.config.get("skip_flood_when_at", True) and getattr(
-                event, "is_at_or_wake_command", False
-            ):
-                return
-
             now = time.time()
             content = self._normalize_content(event.message_str)
             flood_hit, repeat_hit = self._check_flood(
@@ -691,7 +712,7 @@ class AntiFloodPlugin(Star):
                 reason = "条数超限" if flood_hit else "重复内容"
                 action = self._effective_action(group_id_str)
                 # 梯度处置：窗口内反复刷屏自动升级
-                if self.config.get("flood_gradient", True):
+                if self._safe_bool(self.config.get("flood_gradient"), True):
                     rec = self._flood_levels.get(user_key)
                     if not rec:
                         rec = {"count": 0, "first_ts": now, "block_until": 0}
@@ -712,7 +733,7 @@ class AntiFloodPlugin(Star):
                             self.config.get("gradient_block_minutes", 10), 10
                         ) * 60
                         self.stats["flood_blocked"] += 1
-                        if self.config.get("log_ignored", True):
+                        if self._safe_bool(self.config.get("log_ignored"), True):
                             logger.info(
                                 f"刷屏命中 {rec['count']} 次，进入冷却期硬拦截: "
                                 f"{sender_name}({sender_id}) 内容={content[:50]}"
@@ -733,7 +754,7 @@ class AntiFloodPlugin(Star):
                     self._llm_ask_targets[user_key] = now + self._safe_float(
                         self.config.get("ask_llm_window_seconds", 60), 60
                     )
-                    if self.config.get("log_ignored", True):
+                    if self._safe_bool(self.config.get("log_ignored"), True):
                         logger.info(
                             f"刷屏命中 ({reason})，已交给 LLM 自行判断: "
                             f"{sender_name}({sender_id})"
@@ -743,7 +764,7 @@ class AntiFloodPlugin(Star):
                     self.stats["flood_blocked"] += 1
                 else:
                     self.stats["repeat_blocked"] += 1
-                if self.config.get("log_ignored", True):
+                if self._safe_bool(self.config.get("log_ignored"), True):
                     logger.info(
                         f"已拦截刷屏消息 ({reason}): {sender_name}({sender_id}) "
                         f"内容={content[:50]}"
@@ -776,7 +797,7 @@ class AntiFloodPlugin(Star):
             f"{self.config.get('flood_max_messages', 5)} 条"
             + (
                 ""
-                if self.config.get("enable_flood_check", True)
+                if self._safe_bool(self.config.get("enable_flood_check"), True)
                 else " (已关闭)"
             ),
             f"- 重复限制: "
@@ -784,7 +805,7 @@ class AntiFloodPlugin(Star):
             f"{self.config.get('repeat_max_count', 3)} 次"
             + (
                 ""
-                if self.config.get("enable_repeat_check", True)
+                if self._safe_bool(self.config.get("enable_repeat_check"), True)
                 else " (已关闭)"
             ),
             f"- 刷屏处置: "
@@ -810,7 +831,7 @@ class AntiFloodPlugin(Star):
             "【拦截统计】"
             + (
                 "（已持久化，重启后保留）"
-                if self.config.get("persist_stats", True)
+                if self._safe_bool(self.config.get("persist_stats"), True)
                 else "（重启后清零）"
             ),
             f"- 忽略 bot 消息: {self.stats['bot_ignored']}",

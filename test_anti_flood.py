@@ -435,6 +435,37 @@ class TestLlmAskMode(unittest.TestCase):
 
         self.assertTrue(asyncio.run(run()))
 
+    def test_cooldown_admin_exempt(self):
+        # 冷却期硬拦截应豁免管理员/白名单（豁免优先于拦截）
+        p = make_plugin(ignore_admin=True, whitelist_ids="777")
+        key = p._user_key(FakeEvent(group_id="g1", sender_id="u1"), "u1")
+        p._flood_levels[key] = {
+            "count": 3, "first_ts": time.time(), "block_until": time.time() + 600,
+        }
+        ev_admin = FakeEvent(group_id="g1", sender_id="u1", is_admin=True)
+        asyncio.run(p.intercept(ev_admin))
+        self.assertEqual(p.stats["flood_blocked"], 0)
+        ev_white = FakeEvent(group_id="g1", sender_id="777", is_admin=False)
+        p._flood_levels[p._user_key(ev_white, "777")] = {
+            "count": 3, "first_ts": time.time(), "block_until": time.time() + 600,
+        }
+        asyncio.run(p.intercept(ev_white))
+        self.assertEqual(p.stats["flood_blocked"], 0)
+
+    def test_cooldown_expiry_decays_count(self):
+        # 冷却到期后衰减梯度计数，避免解除后立刻再次硬拦截
+        p = make_plugin(flood_gradient=True, gradient_hard_threshold=3)
+        key = p._user_key(FakeEvent(group_id="g1", sender_id="u1"), "u1")
+        # 模拟冷却已到期（block_until 在过去），count 应减半保留至少 1
+        p._flood_levels[key] = {
+            "count": 6, "first_ts": time.time(), "block_until": time.time() - 1,
+        }
+        ev = FakeEvent(group_id="g1", sender_id="u1", message_str="aa")
+        p._is_exempt = lambda e, s: False
+        asyncio.run(p.intercept(ev))
+        self.assertEqual(p._flood_levels[key]["count"], 3)
+        self.assertEqual(p._flood_levels[key]["block_until"], 0)
+
 
 class TestReport(unittest.TestCase):
     """拦截自动上报：目标解析、节流、触发链路"""
