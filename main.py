@@ -239,8 +239,10 @@ class AntiFloodPlugin(Star):
         try:
             path = self._stats_path()
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.stats, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
         except Exception as e:
             logger.error(f"保存拦截统计失败: {e}")
 
@@ -956,8 +958,10 @@ class AntiFloodPlugin(Star):
         try:
             path = self._marked_path()
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.marked_bots, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
         except Exception as e:
             logger.error(f"保存标记名单失败: {e}")
 
