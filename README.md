@@ -34,11 +34,16 @@
 
 3. **拦截统计**：记录忽略/拦截次数，可用 `/af status` 查看；`persist_stats` 开启时
    统计持久化到 plugin_data，重启不丢失
-
 4. **拦截自动上报**：拦截刷屏消息时向 `report_admins` 配置的管理员会话推送摘要
    （时间 / 群号 / 用户 / 原因 / 处置 / 内容），同用户按 `report_throttle_minutes`
    节流，避免持续刷屏时提醒消息刷屏；`report_enable` 关闭或未配置 `report_admins`
    时不发送
+5. **静默时段**（v1.2.0）：配置 `flood_quiet_hours`（如 `23:00-07:00`，支持跨天）后，
+   该时段内暂停刷屏/重复拦截、所有消息正常放行；bot 过滤不受影响；
+   `/af status` 会标注当前是否处于静默中
+6. **拦截排行报表与趋势**（v1.2.0）：按群累计每个用户的被拦截次数，
+   `/af report` 查看本群 Top10 排行（含"刷屏大户"）与近 7 天拦截趋势条形图；
+   旧版 stats.json（仅计数）兼容读取
 
 ## 安装
 
@@ -52,7 +57,8 @@
 
 | 指令 | 说明 |
 | --- | --- |
-| `/af status` | 查看插件状态、配置与拦截统计 |
+| `/af status` | 查看插件状态、配置、静默时段与拦截统计 |
+| `/af report` | 查看本群拦截排行 Top10 与近 7 天趋势 |
 | `/af mark_bot <QQ号>` | 将某账号标记为 bot，其消息将被静默忽略 |
 | `/af unmark_bot <QQ号>` | 取消 bot 标记 |
 | `/af marklist` | 查看手动标记的 bot 列表 |
@@ -63,6 +69,7 @@
 
 - 手动标记的 bot 名单持久化在 `data/plugin_data/astrbot_plugin_anti_flood/marked_bots.json`
 - 拦截统计（开启 `persist_stats` 时）持久化在 `data/plugin_data/astrbot_plugin_anti_flood/stats.json`
+  （v1.2.0 起含按群用户排行 `users` 与近 7 天每日趋势 `daily`）
 - 刷屏检测记录、梯度计数与 AI 提醒目标保存在内存中，重启后清零
 
 ## 注意事项

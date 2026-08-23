@@ -11,6 +11,8 @@
    - 梯度处置：窗口内反复刷屏自动升级（拦截 → ask_llm → 冷却期硬拦截）
    - 按群覆盖：每个群可独立设置 flood_action / bot_filter_mode
 3. 拦截统计持久化，重启不丢失
+4. 静默时段（flood_quiet_hours）：该时段内暂停刷屏拦截、全部放行（v1.2.0）
+5. 拦截排行报表：按群记录谁最常被拦截，/af report 查看 Top10 与近 7 天趋势（v1.2.0）
 拦截方式均为静默忽略（stop_event），不会发送警告消息，避免插件自身刷屏。
 """
 
@@ -20,6 +22,7 @@ import os
 import re
 import time
 from collections import defaultdict, deque
+from datetime import datetime
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.all import MessageChain, Plain
@@ -31,6 +34,9 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 # 协议端可能返回的机器人标记字段名（非 OneBot v11 标准，属于扩展字段）
 _BOT_FLAG_KEYS = ("is_robot", "is_bot", "robot", "is_qbot")
+
+# 静默时段格式校验：HH:MM-HH:MM
+_QUIET_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$")
 
 # bot 过滤模式说明
 _MODE_DESC = {
@@ -53,7 +59,7 @@ _DFT_FLOOD_ACTION = "silence"
 _DFT_BOT_FILTER_MODE = "trigger_only"
 
 
-@register("astrbot_plugin_anti_flood", "Administrator", "防刷屏与 Bot 消息过滤器", "1.1.3")
+@register("astrbot_plugin_anti_flood", "Administrator", "防刷屏与 Bot 消息过滤器", "1.2.0")
 class AntiFloodPlugin(Star):
     """防止自动刷屏，选择性忽略其他 bot 的消息。"""
 
@@ -74,13 +80,15 @@ class AntiFloodPlugin(Star):
         self._repeat_history: dict[str, dict[str, deque[float]]] = defaultdict(
             lambda: defaultdict(lambda: deque(maxlen=100))
         )
-        # 拦截统计
-        self.stats: dict[str, int] = {
+        # 拦截统计（v1.2.0 起含按群用户排行 users 与每日趋势 daily）
+        self.stats: dict = {
             "bot_ignored": 0,
             "flood_blocked": 0,
             "repeat_blocked": 0,
             "llm_judged": 0,
             "llm_held": 0,
+            "users": {},   # {f"{gid}|{uid}": {"name": str, "count": int}}
+            "daily": {},   # {date: {"bot": n, "flood": n, "repeat": n}}
         }
         # ask_llm 模式下命中刷屏的用户: {user_id: 提醒过期时间戳}
         self._llm_ask_targets: dict[str, float] = {}
@@ -212,6 +220,122 @@ class AntiFloodPlugin(Star):
                 return override["bot_filter_mode"]
         return str(self.config.get("bot_filter_mode", _DFT_BOT_FILTER_MODE))
 
+    # ==================== 静默时段（v1.2.0） ====================
+
+    def _quiet_hours(self) -> tuple[str, str] | None:
+        """解析静默时段配置（HH:MM-HH:MM，支持跨天），非法/起止相同返回 None"""
+        v = str(self.config.get("flood_quiet_hours", "") or "").strip()
+        m = _QUIET_RE.match(v)
+        if not m:
+            return None
+        start = f"{m.group(1)}:{m.group(2)}"
+        end = f"{m.group(3)}:{m.group(4)}"
+        if start == end:
+            return None
+        return (start, end)
+
+    def _in_quiet_hours(self, now: datetime | None = None) -> bool:
+        """当前时间是否处于静默时段（时段内暂停刷屏拦截、全部放行）"""
+        qh = self._quiet_hours()
+        if not qh:
+            return False
+        now = now or datetime.now()
+        cur = now.strftime("%H:%M")
+        start, end = qh
+        if start < end:
+            return start <= cur < end
+        return cur >= start or cur < end
+
+    # ==================== 拦截排行与趋势（v1.2.0） ====================
+
+    def _record_block(self, event: AstrMessageEvent, sender_id: str,
+                      sender_name: str, kind: str):
+        """记录一次拦截：总数由调用方维护，这里累计按群用户排行与每日趋势。
+
+        kind ∈ {"bot", "flood", "repeat"}；失败不影响拦截主流程。
+        """
+        try:
+            gid = ""
+            try:
+                gid = str(event.get_group_id() or "").strip()
+            except Exception:
+                pass
+            gkey = f"{gid or 'private'}|{sender_id}"
+            users = self.stats.setdefault("users", {})
+            if not isinstance(users, dict):
+                users = self.stats["users"] = {}
+            entry = users.setdefault(gkey, {"name": "", "count": 0})
+            if sender_name and not entry.get("name"):
+                entry["name"] = str(sender_name)[:20]
+            entry["count"] = int(entry.get("count", 0)) + 1
+            daily = self.stats.setdefault("daily", {})
+            if not isinstance(daily, dict):
+                daily = self.stats["daily"] = {}
+            date = datetime.now().strftime("%Y-%m-%d")
+            day = daily.setdefault(date, {"bot": 0, "flood": 0, "repeat": 0})
+            day[kind] = int(day.get(kind, 0)) + 1
+            # 保留最近 7 天趋势
+            cutoff = (
+                datetime.fromtimestamp(time.time() - 7 * 86400).strftime("%Y-%m-%d")
+            )
+            for d in [k for k in daily if k < cutoff]:
+                del daily[d]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"拦截统计记录异常: {e}")
+
+    def _report_text(self, event: AstrMessageEvent) -> str:
+        """渲染本群拦截排行 Top10 与近 7 天趋势"""
+        try:
+            gid = str(event.get_group_id() or "").strip()
+        except Exception:
+            gid = ""
+        prefix = f"{gid or 'private'}|"
+        rows = []
+        for k, v in (self.stats.get("users") or {}).items():
+            if not isinstance(v, dict) or not k.startswith(prefix):
+                continue
+            try:
+                count = int(v.get("count", 0))
+            except (TypeError, ValueError):
+                continue
+            rows.append((count, str(v.get("name") or k[len(prefix):])))
+        lines = []
+        if rows:
+            rows.sort(key=lambda r: -r[0])
+            medals = ["🥇", "🥈", "🥉"]
+            lines.append(f"📊 拦截排行（共 {len(rows)} 人上榜）")
+            for i, (count, name) in enumerate(rows[:10]):
+                icon = medals[i] if i < 3 else f"{i + 1}."
+                display = name if len(name) <= 12 else name[:11] + "…"
+                lines.append(f"{icon} {display} · 被拦截 {count} 次")
+            top = rows[0]
+            lines.append(f"👑 刷屏大户：{top[1]}（{top[0]} 次）")
+        else:
+            lines.append("📭 本群暂无拦截记录")
+        # 近 7 天趋势条形图
+        daily = self.stats.get("daily") or {}
+        today = datetime.now()
+        trend_lines = []
+        max_total = 0
+        days_data = []
+        for offset in range(6, -1, -1):
+            d = (today.timestamp() - offset * 86400)
+            key = datetime.fromtimestamp(d).strftime("%Y-%m-%d")
+            day = daily.get(key) or {}
+            total = sum(int(day.get(x, 0)) for x in ("bot", "flood", "repeat"))
+            days_data.append((key[5:], total))
+            max_total = max(max_total, total)
+        lines.append("")
+        lines.append("📈 近 7 天拦截趋势")
+        if max_total <= 0:
+            lines.append("（暂无数据）")
+        else:
+            for label, total in days_data:
+                bars = max(1, round(total / max_total * 20)) if total > 0 else 0
+                bar = "█" * bars
+                lines.append(f"{label} {bar} {total}")
+        return "\n".join(lines)
+
     def _stats_path(self) -> str:
         base = os.path.join(
             get_astrbot_data_path(), "plugin_data", "astrbot_plugin_anti_flood"
@@ -219,16 +343,29 @@ class AntiFloodPlugin(Star):
         return os.path.join(base, "stats.json")
 
     def _load_stats(self):
-        """启动时加载持久化统计"""
+        """启动时加载持久化统计（兼容 v1.1.x 仅计数键的旧格式）"""
         try:
             path = self._stats_path()
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, dict):
-                    for k, v in data.items():
-                        if k in self.stats and isinstance(v, int):
-                            self.stats[k] = v
+                    for k in ("bot_ignored", "flood_blocked", "repeat_blocked",
+                              "llm_judged", "llm_held"):
+                        if isinstance(data.get(k), int):
+                            self.stats[k] = data[k]
+                    users = data.get("users")
+                    if isinstance(users, dict):
+                        self.stats["users"] = {
+                            str(k): v for k, v in users.items()
+                            if isinstance(v, dict)
+                        }
+                    daily = data.get("daily")
+                    if isinstance(daily, dict):
+                        self.stats["daily"] = {
+                            str(k): v for k, v in daily.items()
+                            if isinstance(v, dict)
+                        }
         except Exception as e:
             logger.error(f"加载拦截统计失败: {e}")
 
@@ -660,6 +797,7 @@ class AntiFloodPlugin(Star):
                     event, sender_id, sender_name, mode
                 ):
                     self.stats["bot_ignored"] += 1
+                    self._record_block(event, sender_id, sender_name, "bot")
                     if self._safe_bool(self.config.get("log_ignored"), True):
                         logger.info(
                             f"已忽略 bot 消息"
@@ -677,6 +815,9 @@ class AntiFloodPlugin(Star):
                 self.config.get("enable_repeat_check"), True
             )
             if not flood_on and not repeat_on:
+                return
+            # 静默时段：时段内暂停刷屏/重复拦截，全部放行（bot 过滤仍生效）
+            if self._in_quiet_hours():
                 return
             if self._is_exempt(event, sender_id):
                 return
@@ -696,6 +837,7 @@ class AntiFloodPlugin(Star):
                     rec["block_until"] = 0
                 elif rec.get("block_until", 0) > now0:
                     self.stats["flood_blocked"] += 1
+                    self._record_block(event, sender_id, sender_name, "flood")
                     if self._safe_bool(self.config.get("log_ignored"), True):
                         logger.info(
                             f"冷却期内拦截刷屏用户: {sender_name}({sender_id}) "
@@ -740,6 +882,7 @@ class AntiFloodPlugin(Star):
                             self.config.get("gradient_block_minutes", 10), 10
                         ) * 60
                         self.stats["flood_blocked"] += 1
+                        self._record_block(event, sender_id, sender_name, "flood")
                         if self._safe_bool(self.config.get("log_ignored"), True):
                             logger.info(
                                 f"刷屏命中 {rec['count']} 次，进入冷却期硬拦截: "
@@ -769,8 +912,10 @@ class AntiFloodPlugin(Star):
                     return
                 if flood_hit:
                     self.stats["flood_blocked"] += 1
+                    self._record_block(event, sender_id, sender_name, "flood")
                 else:
                     self.stats["repeat_blocked"] += 1
+                    self._record_block(event, sender_id, sender_name, "repeat")
                 if self._safe_bool(self.config.get("log_ignored"), True):
                     logger.info(
                         f"已拦截刷屏消息 ({reason}): {sender_name}({sender_id}) "
@@ -790,11 +935,26 @@ class AntiFloodPlugin(Star):
         """防刷屏插件管理指令组"""
 
     @filter.permission_type(PermissionType.ADMIN)
+    @flood.command("report")
+    async def flood_report(self, event: AstrMessageEvent):
+        """查看本群拦截排行 Top10 与近 7 天拦截趋势"""
+        yield event.plain_result(self._report_text(event))
+
+    @filter.permission_type(PermissionType.ADMIN)
     @flood.command("status")
     async def flood_status(self, event: AstrMessageEvent):
         """查看插件状态与拦截统计"""
+        quiet = self._quiet_hours()
+        in_quiet = self._in_quiet_hours()
+        quiet_line = (
+            f"- 静默时段: {quiet[0]}-{quiet[1]}"
+            f"（{'当前静默中，刷屏拦截暂停' if in_quiet else '当前不在静默时段'}）"
+            if quiet
+            else "- 静默时段: 未启用"
+        )
         lines = [
-            "【防刷屏插件状态】",
+            "【防刷屏插件状态 v1.2.0】",
+            quiet_line,
             f"- Bot 过滤: {'开启' if self._safe_bool(self.config.get('enable_bot_filter'), True) else '关闭'}",
             f"- 过滤模式: "
             f"{_MODE_DESC.get(str(self.config.get('bot_filter_mode', _DFT_BOT_FILTER_MODE)), '未知')}",

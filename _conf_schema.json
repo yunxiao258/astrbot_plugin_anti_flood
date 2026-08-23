@@ -9,7 +9,11 @@
         "description": "bot 消息过滤模式",
         "type": "string",
         "hint": "all：屏蔽所有识别为 bot 的消息；trigger_only：仅屏蔽会触发本 bot 响应的消息（@ 本 bot / 带唤醒前缀），bot 普通消息放行，推荐多 bot 群使用以切断互聊循环；manual_only：仅屏蔽手动名单（bot_ids / 手动标记）中的 bot，自动探测结果不用于屏蔽。",
-        "options": ["all", "trigger_only", "manual_only"],
+        "options": [
+            "all",
+            "trigger_only",
+            "manual_only"
+        ],
         "default": "trigger_only"
     },
     "bot_ids": {
@@ -106,7 +110,10 @@
         "description": "刷屏命中后的处置方式",
         "type": "string",
         "hint": "silence：直接静默拦截刷屏消息，不进入 AI 决策链（默认）；ask_llm：刷屏消息照常进入 LLM，插件在系统提示词中注入指令说明（附带当前用户真实 ID），LLM 若决定不回答可隐蔽输出关键指令 <silent />，插件解析后本地决策不将本条消息发送到群聊。不设置任何屏蔽时间。",
-        "options": ["silence", "ask_llm"],
+        "options": [
+            "silence",
+            "ask_llm"
+        ],
         "default": "silence"
     },
     "flood_gradient": {
@@ -186,5 +193,11 @@
         "type": "int",
         "hint": "同一用户在节流间隔内最多上报一次，避免持续刷屏时提醒消息刷屏。",
         "default": 5
+    },
+    "flood_quiet_hours": {
+        "description": "静默时段（HH:MM-HH:MM，支持跨天如 23:00-07:00）",
+        "type": "string",
+        "hint": "该时段内暂停刷屏/重复拦截、所有消息正常放行；bot 过滤不受影响。留空表示不启用，非法格式自动视为未启用。",
+        "default": ""
     }
 }
