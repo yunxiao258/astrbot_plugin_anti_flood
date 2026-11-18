@@ -2,14 +2,16 @@
 """anti_flood 新功能测试（v1.2.0）：静默时段、拦截排行报表、每日趋势统计。"""
 
 import asyncio
+import os
 import sys
 import time
 import unittest
 from datetime import datetime, timedelta
 from unittest import mock
 
-sys.path.insert(0, r"D:\astrbot\data\plugins\astrbot_plugin_anti_flood")
-sys.path.insert(0, r"D:\astrbot\data\plugins")
+_PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _PLUGIN_DIR)
+sys.path.insert(0, os.path.dirname(_PLUGIN_DIR))
 
 from main import AntiFloodPlugin  # noqa: E402
 
@@ -195,6 +197,31 @@ class TestQuietInHandler(unittest.TestCase):
         self.assertIn("123|spammer", p.stats["users"])
         today_key = max(p.stats["daily"].keys())
         self.assertGreaterEqual(p.stats["daily"][today_key]["flood"], 1)
+
+
+class TestV121Commands(unittest.TestCase):
+    @staticmethod
+    def _collect(async_gen):
+        async def gather():
+            return [x async for x in async_gen]
+        return asyncio.run(gather())
+
+    def test_help_reset_and_mark_bot_usage(self):
+        p = make_plugin(persist_stats=False)
+        ev = FakeEvent()
+        ev.plain_result = lambda msg: msg
+        help_out = self._collect(p.flood_help(ev))
+        self.assertIn("/af status", help_out[0])
+        self.assertIn("/af reset", help_out[0])
+        usage_out = self._collect(p.mark_bot(ev, ""))
+        self.assertIn("/af mark_bot", usage_out[0])
+        p.stats["flood_blocked"] = 5
+        p.stats["users"]["123|u1"] = {"name": "a", "count": 5}
+        reset_out = self._collect(p.flood_reset(ev))
+        self.assertIn("已清空", reset_out[0])
+        self.assertEqual(p.stats["flood_blocked"], 0)
+        self.assertEqual(p.stats["users"], {})
+        asyncio.run(p.terminate())
 
 
 if __name__ == "__main__":

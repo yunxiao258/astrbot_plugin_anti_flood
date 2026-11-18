@@ -1,5 +1,7 @@
 ﻿name: astrbot_plugin_anti_flood
-version: 1.2.0
-author: Administrator
+display_name: 防刷屏与Bot过滤
+version: 1.2.1
+author: 云晓
 desc: 防止自动刷屏，选择性忽略其他 bot 的消息。支持频率限流、重复内容拦截、自动识别其他机器人并静默忽略、梯度处置（拦截→ask_llm→冷却）、按群覆盖配置、AI 隐蔽指令 <silent /> 本地决策不发送、静默时段、拦截排行报表与近 7 天趋势，统计持久化。
+help: 管理指令（管理员）：/af status 查看状态；/af report 查看本群拦截排行与趋势；/af reset 清空统计；/af mark_bot <QQ号> / unmark_bot / marklist 管理 bot 名单；/af block <QQ号> [分钟] / unblock 管理冷却；/af help 查看帮助
 repo: https://github.com/yunxiao258/astrbot_plugin_anti_flood

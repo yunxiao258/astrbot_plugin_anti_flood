@@ -143,7 +143,7 @@
     "group_overrides": {
         "description": "按群覆盖配置",
         "type": "string",
-        "hint": "每行一个群，格式：群号:flood_action[:bot_filter_mode]，留空项使用全局默认。例如：\\n1102410958:ask_llm:\\n789012:silence:all",
+        "hint": "每行一个群，格式：群号:flood_action[:bot_filter_mode]，留空项使用全局默认。例如：\\n1234567890:ask_llm:\\n789012:silence:all",
         "default": ""
     },
     "persist_stats": {
@@ -185,7 +185,7 @@
     "report_admins": {
         "description": "上报目标会话 (unified_msg_origin)",
         "type": "string",
-        "hint": "接收拦截提醒的会话，多个用英文逗号(,)分隔。留空则不上报。示例：onebot:PrivateMessage:10001",
+        "hint": "接收拦截提醒的会话，多个用英文逗号(,)分隔。留空则不上报。示例：onebot:FriendMessage:10001",
         "default": ""
     },
     "report_throttle_minutes": {

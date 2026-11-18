@@ -57,9 +57,11 @@ _DFT_REPEAT_WINDOW = 10        # repeat_window_seconds
 _DFT_CACHE_TTL = 3600          # detect_cache_seconds
 _DFT_FLOOD_ACTION = "silence"
 _DFT_BOT_FILTER_MODE = "trigger_only"
+PLUGIN_AUTHOR = "云晓"
+PLUGIN_VERSION = "1.2.1"
 
 
-@register("astrbot_plugin_anti_flood", "Administrator", "防刷屏与 Bot 消息过滤器", "1.2.0")
+@register("astrbot_plugin_anti_flood", PLUGIN_AUTHOR, "防刷屏与 Bot 消息过滤器", PLUGIN_VERSION)
 class AntiFloodPlugin(Star):
     """防止自动刷屏，选择性忽略其他 bot 的消息。"""
 
@@ -953,7 +955,7 @@ class AntiFloodPlugin(Star):
             else "- 静默时段: 未启用"
         )
         lines = [
-            "【防刷屏插件状态 v1.2.0】",
+            f"【防刷屏插件状态 v{PLUGIN_VERSION}】",
             quiet_line,
             f"- Bot 过滤: {'开启' if self._safe_bool(self.config.get('enable_bot_filter'), True) else '关闭'}",
             f"- 过滤模式: "
@@ -1011,11 +1013,11 @@ class AntiFloodPlugin(Star):
 
     @filter.permission_type(PermissionType.ADMIN)
     @flood.command("mark_bot")
-    async def mark_bot(self, event: AstrMessageEvent, user_id: str):
+    async def mark_bot(self, event: AstrMessageEvent, user_id: str = ""):
         """标记某用户为 bot，其消息将被忽略"""
         user_id = user_id.strip()
         if not user_id:
-            yield event.plain_result("用法: /flood mark_bot <QQ号>")
+            yield event.plain_result("用法: /af mark_bot <QQ号>")
             return
         self.marked_bots[user_id] = {"name": "", "ts": time.time()}
         self._save_marked()
@@ -1091,6 +1093,39 @@ class AntiFloodPlugin(Star):
                 del self._llm_ask_targets[key]
         yield event.plain_result(
             f"已解除 {user_id} 的刷屏冷却。" if removed else f"{user_id} 不在冷却名单中。"
+        )
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @flood.command("reset")
+    async def flood_reset(self, event: AstrMessageEvent):
+        """清空拦截统计数据"""
+        self.stats = {
+            "bot_ignored": 0,
+            "flood_blocked": 0,
+            "repeat_blocked": 0,
+            "llm_judged": 0,
+            "llm_held": 0,
+            "users": {},
+            "daily": {},
+        }
+        self._save_stats()
+        yield event.plain_result("已清空防刷屏拦截统计数据。")
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @flood.command("help")
+    async def flood_help(self, event: AstrMessageEvent):
+        """查看防刷屏管理指令帮助"""
+        yield event.plain_result(
+            f"【防刷屏插件 v{PLUGIN_VERSION} 管理指令】\n"
+            "- /af status：查看状态、静默时段与累计统计\n"
+            "- /af report：查看本群拦截排行 Top10 与近 7 天趋势\n"
+            "- /af reset：清空累计拦截统计\n"
+            "- /af mark_bot <用户号>：手动标记为 bot（静默忽略）\n"
+            "- /af unmark_bot <用户号>：取消 bot 标记\n"
+            "- /af marklist：查看手动标记的 bot 列表\n"
+            "- /af block <用户号> [分钟]：手动拉入刷屏冷却\n"
+            "- /af unblock <用户号>：手动解除刷屏冷却\n"
+            "- /af help：显示本帮助"
         )
 
     # ==================== 学习名单持久化 ====================

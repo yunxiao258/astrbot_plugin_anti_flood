@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """anti_flood 插件单元测试：配置解析、bot 识别、刷屏检测、过期清理"""
 import asyncio
+import os
 import sys
 import time
 import unittest
 from collections import deque
 from types import SimpleNamespace
 
-sys.path.insert(0, r"D:\astrbot\data\plugins\astrbot_plugin_anti_flood")
-sys.path.insert(0, r"D:\astrbot\data\plugins")
+_PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _PLUGIN_DIR)
+sys.path.insert(0, os.path.dirname(_PLUGIN_DIR))
 
 from main import AntiFloodPlugin  # noqa: E402
 
@@ -507,7 +509,7 @@ class TestReport(unittest.TestCase):
     def _plugin(self, **overrides):
         return make_plugin(
             report_enable=True,
-            report_admins="onebot:PrivateMessage:10001, onebot:PrivateMessage:10002",
+            report_admins="onebot:FriendMessage:10001, onebot:FriendMessage:10002",
             report_throttle_minutes=5,
             enable_repeat_check=True,
             repeat_max_count=1,
@@ -520,7 +522,7 @@ class TestReport(unittest.TestCase):
         p = self._plugin()
         self.assertEqual(
             p._report_admins(),
-            ["onebot:PrivateMessage:10001", "onebot:PrivateMessage:10002"],
+            ["onebot:FriendMessage:10001", "onebot:FriendMessage:10002"],
         )
         p2 = make_plugin(report_admins="")
         self.assertEqual(p2._report_admins(), [])
