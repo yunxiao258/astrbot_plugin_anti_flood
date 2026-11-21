@@ -63,7 +63,7 @@ try:
 except ImportError:
     from hub_bridge import HUB_PROTOCOL_VERSION, emit_hub_event
 
-PLUGIN_VERSION = "1.3.0"
+PLUGIN_VERSION = "1.3.1"
 
 
 @register("astrbot_plugin_anti_flood", PLUGIN_AUTHOR, "防刷屏与 Bot 消息过滤器", PLUGIN_VERSION)
@@ -325,7 +325,6 @@ class AntiFloodPlugin(Star):
         # 近 7 天趋势条形图
         daily = self.stats.get("daily") or {}
         today = datetime.now()
-        trend_lines = []
         max_total = 0
         days_data = []
         for offset in range(6, -1, -1):
