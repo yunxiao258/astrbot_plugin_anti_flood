@@ -1,4 +1,4 @@
-﻿"""防刷屏与 Bot 消息过滤插件。
+"""防刷屏与 Bot 消息过滤插件。
 
 功能：
 1. 选择性忽略其他 bot 的消息（手动名单 + 昵称正则 + 协议端自动探测 + 手动标记）
@@ -58,11 +58,17 @@ _DFT_CACHE_TTL = 3600          # detect_cache_seconds
 _DFT_FLOOD_ACTION = "silence"
 _DFT_BOT_FILTER_MODE = "trigger_only"
 PLUGIN_AUTHOR = "云晓"
-PLUGIN_VERSION = "1.2.1"
+try:
+    from .hub_bridge import HUB_PROTOCOL_VERSION, emit_hub_event
+except ImportError:
+    from hub_bridge import HUB_PROTOCOL_VERSION, emit_hub_event
+
+PLUGIN_VERSION = "1.3.0"
 
 
 @register("astrbot_plugin_anti_flood", PLUGIN_AUTHOR, "防刷屏与 Bot 消息过滤器", PLUGIN_VERSION)
 class AntiFloodPlugin(Star):
+    HUB_PROTOCOL_VERSION = HUB_PROTOCOL_VERSION
     """防止自动刷屏，选择性忽略其他 bot 的消息。"""
 
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -282,6 +288,8 @@ class AntiFloodPlugin(Star):
             )
             for d in [k for k in daily if k < cutoff]:
                 del daily[d]
+            ev_name = "antiflood.bot_detected" if kind == "bot" else "antiflood.flood_blocked"
+            emit_hub_event("astrbot_plugin_anti_flood", ev_name, {"group_id": gid, "bot_id": sender_id if kind == "bot" else "", "user_id": sender_id, "nickname": sender_name, "kind": kind}, self.context)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"拦截统计记录异常: {e}")
 
@@ -1021,6 +1029,7 @@ class AntiFloodPlugin(Star):
             return
         self.marked_bots[user_id] = {"name": "", "ts": time.time()}
         self._save_marked()
+        emit_hub_event("astrbot_plugin_anti_flood", "antiflood.bot_detected", {"bot_id": user_id, "source": "manual_mark"}, self.context)
         yield event.plain_result(f"已将 {user_id} 标记为 bot，其消息将被静默忽略。")
 
     @filter.permission_type(PermissionType.ADMIN)
@@ -1164,3 +1173,41 @@ class AntiFloodPlugin(Star):
         """插件卸载/停用时保存数据"""
         self._save_marked()
         self._save_stats()
+
+    def hub_status(self) -> dict:
+        return {
+            "version": PLUGIN_VERSION,
+            "status": "online",
+            "metrics": {
+                "Bot拦截": int(self.stats.get("bot_blocked", 0)),
+                "刷屏拦截": int(self.stats.get("flood_blocked", 0)),
+                "重复拦截": int(self.stats.get("repeat_blocked", 0)),
+                "标记Bot数": len(self.marked_bots),
+            },
+            "actions": ["get_bot_ids", "mark_bot", "unmark_bot", "get_stats"],
+        }
+
+    async def hub_action(self, action: str, params: dict | None = None) -> dict:
+        p = params or {}
+        if action == "get_bot_ids":
+            ids = sorted(self._bot_id_set() | set(self.marked_bots.keys()))
+            return {"ok": True, "data": {"bot_ids": ids, "marked": sorted(self.marked_bots.keys())}}
+        if action == "mark_bot":
+            bid = str(p.get("bot_id") or p.get("user_id") or "").strip()
+            if not bid:
+                return {"ok": False, "error": "缺少 bot_id"}
+            self.marked_bots[bid] = {"name": str(p.get("name", "")), "ts": time.time()}
+            self._save_marked()
+            if not p.get("_hub_origin"):
+                emit_hub_event("astrbot_plugin_anti_flood", "antiflood.bot_detected", {"bot_id": bid, "source": "hub_action"}, self.context)
+            return {"ok": True, "data": {"bot_id": bid, "marked_count": len(self.marked_bots)}}
+        if action == "unmark_bot":
+            bid = str(p.get("bot_id") or p.get("user_id") or "").strip()
+            removed = bid in self.marked_bots
+            self.marked_bots.pop(bid, None)
+            if removed:
+                self._save_marked()
+            return {"ok": True, "data": {"bot_id": bid, "removed": removed}}
+        if action == "get_stats":
+            return {"ok": True, "data": dict(self.stats)}
+        return {"ok": False, "error": f"不支持的动作：{action}"}
